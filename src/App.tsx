@@ -9,7 +9,7 @@ import { createClient } from '@supabase/supabase-js';
 
 /* ---------------------------------- constants ---------------------------------- */
 
-const APP_NAME = 'ShowHub';
+const APP_NAME = 'Playbin';
 
 const TYPE_META = {
   series: { label: 'Series', singular: 'Series', color: '#4FA8FF', icon: Tv2, defaultMinutes: 45 },
@@ -42,7 +42,7 @@ const TMDB_API_KEY = '2b62dfba88093af4ceb731b0c218f01c';
 
 // Paste the email you want bug reports sent to. No server needed — this just opens
 // the user's own email app with the message pre-filled.
-const SUPPORT_EMAIL = 'PASTE_YOUR_EMAIL_HERE@example.com';
+const SUPPORT_EMAIL = 'playbinreport@yahoo.com';
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 
 // Paste your Supabase project URL and anon/public key (Settings → API in your
@@ -51,7 +51,16 @@ const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 // hiding this key.
 const SUPABASE_URL = 'PASTE_YOUR_SUPABASE_URL_HERE';
 const SUPABASE_ANON_KEY = 'PASTE_YOUR_SUPABASE_ANON_KEY_HERE';
-const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// If Supabase hasn't been set up yet (still the placeholder values), the app runs in
+// local-only mode instead of crashing — accounts/cloud sync just won't be available
+// until real keys are pasted in above.
+const SUPABASE_CONFIGURED = SUPABASE_URL && SUPABASE_URL !== 'PASTE_YOUR_SUPABASE_URL_HERE'
+  && SUPABASE_ANON_KEY && SUPABASE_ANON_KEY !== 'PASTE_YOUR_SUPABASE_ANON_KEY_HERE';
+let supabaseClient = null;
+if (SUPABASE_CONFIGURED) {
+  try { supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY); }
+  catch (e) { console.error('Supabase failed to initialize', e); }
+}
 
 /* ---------------------------------- generic helpers ---------------------------------- */
 
@@ -135,9 +144,11 @@ async function saveSearchHistory(list) { storageSet(SEARCH_HISTORY_KEY, list); }
    across every device the person signs into. */
 
 async function signInWithGoogle() {
+  if (!supabaseClient) { alert("Accounts aren't set up yet — this app still works fully without one."); return; }
   await supabaseClient.auth.signInWithOAuth({ provider: 'google' });
 }
 async function signOutCloud() {
+  if (!supabaseClient) return;
   await supabaseClient.auth.signOut();
 }
 
@@ -1071,7 +1082,7 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `showhub-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `playbin-backup-${new Date().toISOString().slice(0, 10)}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1089,7 +1100,7 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
         onImport(data);
         setImportMsg(`Imported ${data.items.length} titles.`);
       } catch (err) {
-        setImportMsg("Couldn't read that file — make sure it's a ShowHub backup.");
+        setImportMsg("Couldn't read that file — make sure it's a Playbin backup.");
       }
     };
     reader.readAsText(file);
@@ -1193,7 +1204,7 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
 
       <a
         className="report-bug-link"
-        href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('ShowHub Bug Report')}&body=${encodeURIComponent('Describe what happened:\n\n\nWhat did you expect to happen instead?\n\n')}`}
+        href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Playbin Bug Report')}&body=${encodeURIComponent('Describe what happened:\n\n\nWhat did you expect to happen instead?\n\n')}`}
       >
         <Flame size={14} /> Report a bug
       </a>
@@ -1533,6 +1544,7 @@ export default function App() {
   // Checked once on load — flip app_config.maintenance_mode in Supabase any time to
   // take the app offline for everyone instantly, no redeploy needed.
   useEffect(() => {
+    if (!supabaseClient) { setMaintenance(false); return; }
     supabaseClient.from('app_config').select('maintenance_mode, maintenance_message').eq('id', 1).maybeSingle()
       .then(({ data }) => {
         if (data && data.maintenance_mode) setMaintenance({ message: data.maintenance_message });
@@ -1543,6 +1555,7 @@ export default function App() {
 
   // Watch for sign-in / sign-out, including the moment the Google redirect completes.
   useEffect(() => {
+    if (!supabaseClient) { setAuthChecked(true); return; }
     supabaseClient.auth.getSession().then(({ data }) => {
       setSession(data.session);
       setAuthChecked(true);
@@ -1754,7 +1767,7 @@ export default function App() {
         <GlobalStyle />
         <div className="maintenance-screen">
           <Ticket size={36} className="maintenance-icon" />
-          <h1>ShowHub</h1>
+          <h1>Playbin</h1>
           <p>{maintenance.message}</p>
         </div>
       </div>
