@@ -725,7 +725,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
         const r = await searchAllSources(q);
         setResults(r);
         if (r.allFailed) {
-          setSearchError(`Couldn't reach any source inside this preview (${r.errors.series || r.errors.anime || r.errors.movie}). This Claude.ai sandbox likely blocks outbound network calls — use the test file to confirm it outside the sandbox.`);
+          setSearchError("Couldn't reach the database right now — check your connection and try again in a moment.");
         }
       } catch (e) {
         setSearchError("Couldn't connect to the database. Try again.");
@@ -1247,6 +1247,24 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // Picking "Watched" for a series/anime checks off every episode too, instead of
+  // leaving the status and checklist out of sync with each other.
+  const handleStatusChange = (k) => {
+    if (k === 'completed' && isEpisodic) {
+      if (isFromDb && seasons && seasons.length > 0) {
+        const allIds = seasons.flatMap(s => s.episodes.map(e => e.id));
+        setForm(f => ({ ...f, status: k, watchedEpisodeIds: allIds, totalEpisodes: allIds.length || f.totalEpisodes }));
+        return;
+      }
+      if (!isFromDb) {
+        setForm(f => ({ ...f, status: k, episodesWatched: f.totalEpisodes || f.episodesWatched }));
+        return;
+      }
+    }
+    set('status', k);
+  };
+
+
   const save = () => {
     if (!form.title.trim()) return;
     const now = new Date().toISOString();
@@ -1298,7 +1316,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
         <div className="segmented">
           {Object.entries(STATUS_META).map(([k, sm]) => (
             <button key={k} className={`seg-btn ${form.status === k ? 'active' : ''}`}
-              style={{ '--c': sm.color }} onClick={() => set('status', k)}>{sm.short}</button>
+              style={{ '--c': sm.color }} onClick={() => handleStatusChange(k)}>{sm.short}</button>
           ))}
         </div>
 
@@ -1619,14 +1637,17 @@ export default function App() {
       const set = new Set(it.watchedEpisodeIds || []);
       set.has(episodeId) ? set.delete(episodeId) : set.add(episodeId);
       const watchedEpisodeIds = Array.from(set);
+      // Checking off the last remaining episode finishes the show automatically —
+      // no need to also flip the status picker by hand.
+      const isNowComplete = it.totalEpisodes && watchedEpisodeIds.length >= it.totalEpisodes;
       return {
         ...it, watchedEpisodeIds,
-        status: watchedEpisodeIds.length > 0 && it.status === 'planned' ? 'watching' : it.status,
+        status: isNowComplete ? 'completed' : (watchedEpisodeIds.length > 0 && it.status === 'planned' ? 'watching' : it.status),
         dateWatched: new Date().toISOString(),
       };
     });
     persist(next);
-    setModal(m => (m && m.id === itemId) ? { ...m, watchedEpisodeIds: next.find(i => i.id === itemId).watchedEpisodeIds } : m);
+    setModal(m => (m && m.id === itemId) ? { ...m, watchedEpisodeIds: next.find(i => i.id === itemId).watchedEpisodeIds, status: next.find(i => i.id === itemId).status } : m);
   };
 
   const toggleManyEpisodes = (itemId, episodeIds, markWatched) => {
@@ -1635,9 +1656,10 @@ export default function App() {
       const set = new Set(it.watchedEpisodeIds || []);
       episodeIds.forEach(id => markWatched ? set.add(id) : set.delete(id));
       const watchedEpisodeIds = Array.from(set);
+      const isNowComplete = it.totalEpisodes && watchedEpisodeIds.length >= it.totalEpisodes;
       return {
         ...it, watchedEpisodeIds,
-        status: watchedEpisodeIds.length > 0 && it.status === 'planned' ? 'watching' : it.status,
+        status: isNowComplete ? 'completed' : (watchedEpisodeIds.length > 0 && it.status === 'planned' ? 'watching' : it.status),
         dateWatched: new Date().toISOString(),
       };
     });
