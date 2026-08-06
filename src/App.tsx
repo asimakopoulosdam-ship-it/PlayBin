@@ -284,6 +284,7 @@ async function fetchAnimeEpisodesPage(malId, page = 1) {
   return {
     episodes: (data.data || []).map(e => ({ id: `ep${e.mal_id}`, number: e.mal_id, name: e.title, airdate: e.aired })),
     hasNext: !!(data.pagination && data.pagination.has_next_page),
+    lastPage: (data.pagination && data.pagination.last_visible_page) || page,
   };
 }
 
@@ -291,14 +292,27 @@ async function fetchAnimeEpisodesPage(malId, page = 1) {
 // so we build "seasons" by grouping episodes by the year they aired — the same trick
 // Hobi uses for long-running anime like Bleach. Episodes without an air date land in
 // a trailing "Unscheduled" group rather than being dropped.
+//
+// Long-running shows (One Piece, etc.) can have 10+ pages — fetching those one at a
+// time made this noticeably slow. Page 1 tells us the total page count, so the rest
+// are fetched in small parallel batches instead (a gentle pace, to stay within
+// Jikan's rate limit rather than firing everything at once).
 async function fetchAnimeSeasons(malId) {
-  let all = [], page = 1, hasNext = true;
-  while (hasNext && page <= 20) { // generous cap so even very long-running anime resolve fully
-    const r = await fetchAnimeEpisodesPage(malId, page);
-    all = all.concat(r.episodes);
-    hasNext = r.hasNext;
-    page += 1;
+  const first = await fetchAnimeEpisodesPage(malId, 1);
+  let all = [...first.episodes];
+  const lastPage = Math.min(first.lastPage, 20); // generous cap so even very long-running anime resolve fully
+
+  const remainingPages = [];
+  for (let p = 2; p <= lastPage; p++) remainingPages.push(p);
+
+  const BATCH_SIZE = 3;
+  for (let i = 0; i < remainingPages.length; i += BATCH_SIZE) {
+    const batch = remainingPages.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map(p => fetchAnimeEpisodesPage(malId, p)));
+    results.forEach(r => { all = all.concat(r.episodes); });
+    if (i + BATCH_SIZE < remainingPages.length) await new Promise(r => setTimeout(r, 350));
   }
+
   const byYear = {};
   all.forEach(e => {
     const year = e.airdate ? e.airdate.slice(0, 4) : 'unscheduled';
@@ -323,15 +337,23 @@ function normalizeTitle(t) {
 
 // Ranks a category by how well its best match fits the query, so "Naruto" shows Anime
 // first instead of always Movies → Series → Anime regardless of relevance.
-function categoryRelevance(list, query) {
-  if (!list || list.length === 0) return -1;
+// Combines how well the title matches with how well-known the title is, so an
+// obscure exact match (e.g. an obscure "Matrix" show from 1993) doesn't automatically
+// beat the famous title people actually meant (e.g. "The Matrix", 1999) just because
+// its title happens to match more literally. Popularity is on wildly different scales
+// across sources (TMDB ~0-500, Jikan members can be 100,000+), so it's compressed with
+// a log scale before being combined with the match tier.
+function searchScore(result, query) {
   const nq = normalizeTitle(query);
-  const nt = normalizeTitle(list[0].title);
-  if (!nq || !nt) return 10;
-  if (nt === nq) return 100;
-  if (nt.startsWith(nq) || nq.startsWith(nt)) return 80;
-  if (nt.includes(nq) || nq.includes(nt)) return 50;
-  return 10;
+  const nt = normalizeTitle(result.title);
+  let tier = 5;
+  if (nq && nt) {
+    if (nt === nq) tier = 40;
+    else if (nt.startsWith(nq) || nq.startsWith(nt)) tier = 30;
+    else if (nt.includes(nq) || nq.includes(nt)) tier = 20;
+  }
+  const popBonus = Math.min(60, Math.log10((result.popularityScore || 0) + 1) * 20);
+  return tier + popBonus;
 }
 
 async function searchAllSources(q) {
@@ -825,11 +847,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           <div className="group-title" style={{ color: '#7ED957' }}>Results</div>
           <div className="result-list">
             {[...results.movie, ...results.series, ...results.anime]
-              .sort((a, b) => {
-                const rel = categoryRelevance([b], query) - categoryRelevance([a], query);
-                if (rel !== 0) return rel;
-                return (b.popularityScore || 0) - (a.popularityScore || 0); // quietly surfaces the well-known one first
-              })
+              .sort((a, b) => searchScore(b, query) - searchScore(a, query))
               .map(r => (
                 <ResultRow
                   key={r.externalId}
