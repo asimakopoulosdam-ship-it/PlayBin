@@ -258,6 +258,72 @@ async function fetchMovieDetail(tmdbId) {
   };
 }
 
+function daysUntil(dateStr) {
+  const days = Math.ceil((new Date(dateStr + 'T00:00:00') - new Date(new Date().toDateString())) / (1000 * 60 * 60 * 24));
+  return days;
+}
+function daysUntilWeekday(dayName) {
+  const names = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+  const idx = names.findIndex(d => dayName && dayName.toLowerCase().includes(d));
+  if (idx === -1) return null;
+  const today = new Date().getDay();
+  let diff = idx - today;
+  if (diff < 0) diff += 7;
+  return diff;
+}
+
+// Checks each in-progress / planned library item for a known upcoming episode or
+// release date. Fetched live each time the Upcoming view opens rather than cached —
+// air dates shift often enough that a stale countdown would be misleading.
+async function fetchUpcomingForItems(candidates) {
+  const settled = await Promise.allSettled(candidates.map(async (it) => {
+    if (!it.externalId) return null;
+    const dbId = it.externalId.split('-').slice(1).join('-');
+
+    if (it.type === 'series') {
+      const res = await fetch(`https://api.themoviedb.org/3/tv/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const next = data.next_episode_to_air;
+      if (!next || !next.air_date) return null;
+      const days = daysUntil(next.air_date);
+      if (days < 0) return null;
+      return { item: it, days, label: `Season ${next.season_number}, Episode ${next.episode_number}` };
+    }
+
+    if (it.type === 'movie') {
+      const res = await fetch(`https://api.themoviedb.org/3/movie/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data.release_date) return null;
+      const days = daysUntil(data.release_date);
+      if (days < 0) return null;
+      return { item: it, days, label: 'Release' };
+    }
+
+    if (it.type === 'anime') {
+      const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const a = data.data;
+      if (!a) return null;
+      if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
+        const days = daysUntil(a.aired.from.slice(0, 10));
+        if (days < 0) return null;
+        return { item: it, days, label: 'Premiere' };
+      }
+      if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
+        const days = daysUntilWeekday(a.broadcast.day);
+        if (days == null) return null;
+        return { item: it, days, label: 'New episode' };
+      }
+      return null;
+    }
+    return null;
+  }));
+  return settled.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value).sort((a, b) => a.days - b.days);
+}
+
 // Series: TMDB gives real season numbers; one call per season (in parallel) for the episode list.
 async function fetchSeriesSeasons(tmdbId) {
   const showRes = await fetch(`https://api.themoviedb.org/3/tv/${tmdbId}?api_key=${TMDB_API_KEY}`);
@@ -607,6 +673,32 @@ function SplashScreen({ onDone }) {
 
 /* ---------------------------------- Search result card + strip ---------------------------------- */
 
+function UpcomingResultRow({ result, onOpen }) {
+  const meta = TYPE_META[result.type];
+  const Icon = meta.icon;
+  const days = result.releaseDate ? daysUntil(result.releaseDate) : null;
+  return (
+    <button className="upcoming-item-row" onClick={() => onOpen(result)}>
+      <div className="upcoming-item-poster">
+        {result.posterUrl ? <img src={result.posterUrl} alt="" /> : <Icon size={18} />}
+      </div>
+      <div className="upcoming-item-info">
+        <div className="upcoming-item-title">{result.title}</div>
+        <div className="upcoming-item-meta">
+          <span className="chip chip-mini" style={{ '--c': meta.color }}>{meta.singular}</span>
+          {result.extraNote}
+        </div>
+      </div>
+      {days != null && days >= 0 && (
+        <div className="countdown-badge">
+          <div className="countdown-n">{days === 0 ? 'Today' : days}</div>
+          {days !== 0 && <div className="countdown-u">days</div>}
+        </div>
+      )}
+    </button>
+  );
+}
+
 function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
   const meta = TYPE_META[result.type];
   const Icon = meta.icon;
@@ -765,6 +857,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
 /* ---------------------------------- Discover (home) ---------------------------------- */
 
 function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName }) {
+  const [discoverTab, setDiscoverTab] = useState('search'); // 'search' | 'upcoming'
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -773,12 +866,21 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
   const [history, setHistory] = useState([]);
   const [trending, setTrending] = useState(null);
   const [trendingLoading, setTrendingLoading] = useState(true);
+  const [upcomingGlobal, setUpcomingGlobal] = useState(null);
+  const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
   const debounceRef = useRef(null);
 
   useEffect(() => { loadSearchHistory().then(setHistory); }, []);
   useEffect(() => {
     fetchTrendingAll().then(setTrending).catch(() => setTrending([])).finally(() => setTrendingLoading(false));
   }, []);
+  useEffect(() => {
+    if (discoverTab === 'upcoming' && upcomingGlobal === null && !loadingUpcomingGlobal) {
+      setLoadingUpcomingGlobal(true);
+      fetch('/api/upcoming').then(r => r.json()).then(d => setUpcomingGlobal(d.results || []))
+        .catch(() => setUpcomingGlobal([])).finally(() => setLoadingUpcomingGlobal(false));
+    }
+  }, [discoverTab]);
 
   const addToHistory = (q) => {
     setHistory(h => {
@@ -832,6 +934,17 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
         {profileName ? <span className="discover-greet">Hi, {profileName}</span> : null}
       </div>
 
+      <div className="tabs-row">
+        <button className={`tab-btn ${discoverTab === 'search' ? 'active' : ''}`} onClick={() => setDiscoverTab('search')}>
+          <Search size={14} /> Search
+        </button>
+        <button className={`tab-btn ${discoverTab === 'upcoming' ? 'active' : ''}`} onClick={() => setDiscoverTab('upcoming')}>
+          <CalendarDays size={14} /> Upcoming
+        </button>
+      </div>
+
+      {discoverTab === 'search' && (
+      <>
       <div className="search-box">
         <Search size={16} />
         <input
@@ -916,6 +1029,24 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
                 />
               ))}
           </div>
+        </div>
+      )}
+      </>
+      )}
+
+      {discoverTab === 'upcoming' && (
+        <div className="group" style={{ marginTop: 4 }}>
+          {loadingUpcomingGlobal && <p className="dim" style={{ padding: '10px 2px' }}>Loading upcoming titles…</p>}
+          {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length === 0 && (
+            <EmptyState text="Couldn't load upcoming titles right now." cta="Try again in a moment" />
+          )}
+          {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length > 0 && (
+            <div className="item-list">
+              {upcomingGlobal.map(r => (
+                <UpcomingResultRow key={r.externalId} result={r} onOpen={setActiveResult} />
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1037,10 +1168,30 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
   );
 }
 
+function UpcomingRow({ entry, onOpen }) {
+  const { item, days, label } = entry;
+  return (
+    <button className="upcoming-item-row" onClick={onOpen}>
+      <Poster item={item} size={48} />
+      <div className="upcoming-item-info">
+        <div className="upcoming-item-title">{item.title}</div>
+        <div className="upcoming-item-meta">{label}</div>
+      </div>
+      <div className="countdown-badge">
+        <div className="countdown-n">{days === 0 ? 'Today' : days}</div>
+        {days !== 0 && <div className="countdown-u">days</div>}
+      </div>
+    </button>
+  );
+}
+
 function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, onAdvanceEpisode, onMarkAllWatched }) {
   const [activeType, setActiveType] = useState('movie');
   const [sortBy, setSortBy] = useState('recent');
   const [searchOpen, setSearchOpen] = useState(false);
+  const [upcomingOpen, setUpcomingOpen] = useState(false);
+  const [upcomingList, setUpcomingList] = useState(null);
+  const [loadingUpcoming, setLoadingUpcoming] = useState(false);
   const meta = TYPE_META[activeType];
   const filtered = items.filter(i => i.type === activeType);
   const groups = ['watching', 'planned', 'completed'].map(st => ({
@@ -1048,67 +1199,107 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
     list: sortItems(filtered.filter(i => i.status === st), sortBy),
   }));
 
+  const openUpcoming = async () => {
+    setUpcomingOpen(true);
+    setLoadingUpcoming(true);
+    const candidates = items.filter(i => i.status === 'watching' || i.status === 'planned');
+    try {
+      const list = await fetchUpcomingForItems(candidates);
+      setUpcomingList(list);
+    } catch (e) { setUpcomingList([]); }
+    setLoadingUpcoming(false);
+  };
+
   return (
     <div className="screen">
       <h1 className="page-title" style={{ '--c': '#7ED957' }}>My Shows</h1>
 
-      <div className="type-tiles">
-        {TYPE_ORDER.map(t => {
-          const tMeta = TYPE_META[t];
-          const Icon = tMeta.icon;
-          const count = items.filter(i => i.type === t).length;
-          return (
-            <button
-              key={t}
-              className={`type-tile ${activeType === t ? 'active' : ''}`}
-              style={{ '--c': tMeta.color }}
-              onClick={() => setActiveType(t)}
-            >
-              <Icon size={22} />
-              <span>{tMeta.label}</span>
-              <span className="type-tile-count">{count}</span>
-            </button>
-          );
-        })}
+      <div className="upcoming-row">
+        <button
+          className={`upcoming-circle ${upcomingOpen ? 'active' : ''}`}
+          onClick={() => upcomingOpen ? setUpcomingOpen(false) : openUpcoming()}
+        >
+          {upcomingList && upcomingList.length > 0 && !upcomingOpen && <span className="upcoming-badge">{upcomingList.length}</span>}
+          <CalendarDays size={19} />
+          <span>Upcoming</span>
+        </button>
       </div>
 
-      <div className="myshows-list-head">
-        <span className="group-title" style={{ color: meta.color, margin: 0 }}>{meta.label} you've added</span>
-        <button className="add-btn" style={{ '--c': meta.color }} onClick={() => setSearchOpen(true)}><Plus size={18} /></button>
-      </div>
-
-      {filtered.length > 0 && (
-        <div className="sort-row">
-          {SORT_OPTIONS.map(s => (
-            <button key={s.key} className={`sort-btn ${sortBy === s.key ? 'active' : ''}`} onClick={() => setSortBy(s.key)}>
-              {s.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {filtered.length === 0 ? (
-        <EmptyState text={`You haven't added any ${meta.singular.toLowerCase()} yet.`} cta="Tap + to search for it" />
-      ) : (
-        groups.map(g => g.list.length > 0 && (
-          <div className="group" key={g.status}>
-            <div className="group-title" style={{ color: STATUS_META[g.status].color }}>
-              {STATUS_META[g.status].label} · {g.list.length}
-            </div>
+      {upcomingOpen ? (
+        <div className="group">
+          {loadingUpcoming && <p className="dim" style={{ padding: '10px 2px' }}>Checking what's coming up…</p>}
+          {!loadingUpcoming && upcomingList && upcomingList.length === 0 && (
+            <EmptyState text="Nothing upcoming right now." cta="Shows you're watching or plan to watch will show here once dates are announced" />
+          )}
+          {!loadingUpcoming && upcomingList && upcomingList.length > 0 && (
             <div className="item-list">
-              {g.list.map(it => (
-                <SwipeableItemRow
-                  key={it.id}
-                  item={it}
-                  onClick={() => onOpen(it)}
-                  onDelete={onDelete}
-                  onAdvanceEpisode={onAdvanceEpisode}
-                  onMarkAllWatched={onMarkAllWatched}
-                />
+              {upcomingList.map(u => (
+                <UpcomingRow key={u.item.id} entry={u} onOpen={() => onOpen(u.item)} />
               ))}
             </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="type-tiles">
+            {TYPE_ORDER.map(t => {
+              const tMeta = TYPE_META[t];
+              const Icon = tMeta.icon;
+              const count = items.filter(i => i.type === t).length;
+              return (
+                <button
+                  key={t}
+                  className={`type-tile ${activeType === t ? 'active' : ''}`}
+                  style={{ '--c': tMeta.color }}
+                  onClick={() => setActiveType(t)}
+                >
+                  <Icon size={22} />
+                  <span>{tMeta.label}</span>
+                  <span className="type-tile-count">{count}</span>
+                </button>
+              );
+            })}
           </div>
-        ))
+
+          <div className="myshows-list-head">
+            <span className="group-title" style={{ color: meta.color, margin: 0 }}>{meta.label} you've added</span>
+            <button className="add-btn" style={{ '--c': meta.color }} onClick={() => setSearchOpen(true)}><Plus size={18} /></button>
+          </div>
+
+          {filtered.length > 0 && (
+            <div className="sort-row">
+              {SORT_OPTIONS.map(s => (
+                <button key={s.key} className={`sort-btn ${sortBy === s.key ? 'active' : ''}`} onClick={() => setSortBy(s.key)}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {filtered.length === 0 ? (
+            <EmptyState text={`You haven't added any ${meta.singular.toLowerCase()} yet.`} cta="Tap + to search for it" />
+          ) : (
+            groups.map(g => g.list.length > 0 && (
+              <div className="group" key={g.status}>
+                <div className="group-title" style={{ color: STATUS_META[g.status].color }}>
+                  {STATUS_META[g.status].label} · {g.list.length}
+                </div>
+                <div className="item-list">
+                  {g.list.map(it => (
+                    <SwipeableItemRow
+                      key={it.id}
+                      item={it}
+                      onClick={() => onOpen(it)}
+                      onDelete={onDelete}
+                      onAdvanceEpisode={onAdvanceEpisode}
+                      onMarkAllWatched={onMarkAllWatched}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))
+          )}
+        </>
       )}
 
       {searchOpen && (
@@ -1353,31 +1544,38 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
     });
   };
 
+  const statusColor = STATUS_META[form.status].color;
+  const hoursValue = ((Number(form.movieMinutes) || TYPE_META.movie.defaultMinutes) / 60).toFixed(1);
+  const setHours = (v) => set('movieMinutes', Math.max(0, Math.round(parseFloat(v || 0) * 60)));
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e => e.stopPropagation()}>
+      <div className="modal item-modal-v2" style={{ '--c': meta.color }} onClick={e => e.stopPropagation()}>
+        <div className="im-glow" style={{ background: `radial-gradient(circle, color-mix(in srgb, ${meta.color} 35%, transparent), transparent 70%)` }} />
         <div className="modal-head">
           <span className="chip" style={{ '--c': meta.color }}>{meta.singular}</span>
           <button className="icon-x" onClick={onClose}><X size={18} /></button>
         </div>
 
-        {isFromDb ? (
-          <div className="locked-title-row">
-            {form.posterUrl && <img className="locked-title-poster" src={form.posterUrl} alt="" />}
-            <div>
-              <div className="locked-title-text">{form.title}</div>
-              <ExternalStars value={form.externalRating} source={form.externalRatingSource} size={12} />
-            </div>
+        <div className="im-hero">
+          <div className="im-hero-poster">
+            {form.posterUrl ? <img src={form.posterUrl} alt="" /> : (form.emoji ? <span>{form.emoji}</span> : <meta.icon size={26} />)}
           </div>
-        ) : (
-          <input
-            className="modal-title-input"
-            placeholder="Title..."
-            value={form.title}
-            onChange={e => set('title', e.target.value)}
-            autoFocus
-          />
-        )}
+          <div className="im-hero-info">
+            {isFromDb ? (
+              <div className="im-title">{form.title}</div>
+            ) : (
+              <input
+                className="im-title-input"
+                placeholder="Title..."
+                value={form.title}
+                onChange={e => set('title', e.target.value)}
+                autoFocus
+              />
+            )}
+            {isFromDb && <ExternalStars value={form.externalRating} source={form.externalRatingSource} size={13} />}
+          </div>
+        </div>
 
         {!isFromDb && (
           <div className="emoji-row">
@@ -1388,72 +1586,90 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
           </div>
         )}
 
-        <div className="field-label">Status</div>
-        <div className="segmented">
-          {Object.entries(STATUS_META).map(([k, sm]) => (
-            <button key={k} className={`seg-btn ${form.status === k ? 'active' : ''}`}
-              style={{ '--c': sm.color }} onClick={() => handleStatusChange(k)}>{sm.short}</button>
-          ))}
-        </div>
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: statusColor }} />
+          <div className="im-card-label">Status</div>
+          <div className="segmented">
+            {Object.entries(STATUS_META).map(([k, sm]) => (
+              <button key={k} className={`seg-btn ${form.status === k ? 'active' : ''}`}
+                style={{ '--c': sm.color }} onClick={() => handleStatusChange(k)}>
+                <span className="seg-dot" style={{ background: sm.color, opacity: form.status === k ? 1 : 0.45 }} />
+                {sm.short}
+              </button>
+            ))}
+          </div>
 
-        {isEpisodic && !isFromDb && (
-          <div className="field-row">
-            <div className="field">
-              <div className="field-label">Episodes watched</div>
-              <input type="number" min="0" value={form.episodesWatched ?? 0}
-                onChange={e => set('episodesWatched', e.target.value)} />
+          {isEpisodic && !isFromDb && (
+            <div className="im-inline-row two">
+              <div>
+                <div className="im-inline-label">Watched</div>
+                <input type="number" min="0" value={form.episodesWatched ?? 0}
+                  onChange={e => set('episodesWatched', e.target.value)} />
+              </div>
+              <div>
+                <div className="im-inline-label">Total (optional)</div>
+                <input type="number" min="0" value={form.totalEpisodes ?? ''}
+                  onChange={e => set('totalEpisodes', e.target.value)} />
+              </div>
             </div>
-            <div className="field">
-              <div className="field-label">Total (optional)</div>
-              <input type="number" min="0" value={form.totalEpisodes ?? ''}
-                onChange={e => set('totalEpisodes', e.target.value)} />
+          )}
+          {!isEpisodic && (
+            <div className="im-inline-row">
+              <span className="im-inline-label" style={{ margin: 0 }}>Runtime</span>
+              <div className="im-runtime-input">
+                <input type="number" step="0.1" min="0" value={hoursValue} onChange={e => setHours(e.target.value)} />
+                <span>hrs</span>
+              </div>
             </div>
-          </div>
-        )}
-        {!isEpisodic && (
-          <div className="field">
-            <div className="field-label">Runtime (minutes)</div>
-            <input type="number" min="0" value={form.movieMinutes ?? TYPE_META.movie.defaultMinutes}
-              onChange={e => set('movieMinutes', e.target.value)} />
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Episodes live right here, inline — no extra tap to reach them. Works the same
             way for series (real seasons) and anime (seasons grouped by air year). */}
         {isEpisodic && isFromDb && (
-          <>
-            <div className="field-label">Episodes</div>
-            {loadingSeasons && <p className="dim" style={{ padding: '6px 2px 12px' }}>Loading seasons…</p>}
+          <div className="im-card">
+            <div className="im-card-accent" style={{ background: meta.color }} />
+            <div className="im-card-label">Episodes</div>
+            {loadingSeasons && <p className="dim" style={{ padding: '2px 2px 4px' }}>Loading seasons…</p>}
             {seasons && seasons.length > 0 && (
-              <div className="item-list" style={{ marginBottom: 16 }}>
+              <div className="item-list">
                 {seasons.map(s => (
                   <SeasonRow key={s.seasonNumber} season={s} watchedSet={watchedSet} onOpen={() => onOpenEpisodes(form, s)} />
                 ))}
               </div>
             )}
-          </>
+          </div>
         )}
 
-        <div className="field-label">Your rating</div>
-        <div className="rating-row">
-          {Array.from({ length: 10 }).map((_, i) => {
-            const val = i + 1;
-            return (
-              <button key={val} className="rate-dot" onClick={() => set('rating', form.rating === val ? null : val)}>
-                <Star size={17} fill={form.rating >= val ? '#F5A623' : 'none'} stroke={form.rating >= val ? '#F5A623' : '#4A5178'} />
-              </button>
-            );
-          })}
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: '#F5A623' }} />
+          <div className="im-card-top">
+            <div className="im-card-label" style={{ margin: 0 }}>Your rating</div>
+            <div className="im-rating-value">{form.rating || '–'}<span>/10</span></div>
+          </div>
+          <div className="rating-row">
+            {Array.from({ length: 10 }).map((_, i) => {
+              const val = i + 1;
+              return (
+                <button key={val} className="rate-dot" onClick={() => set('rating', form.rating === val ? null : val)}>
+                  <Star size={17} fill={form.rating >= val ? '#F5A623' : 'none'} stroke={form.rating >= val ? '#F5A623' : '#4A5178'} />
+                </button>
+              );
+            })}
+          </div>
         </div>
 
-        <div className="field-label">Notes</div>
-        <textarea rows={2} placeholder="Optional..." value={form.notes || ''}
-          onChange={e => set('notes', e.target.value)} />
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: meta.color }} />
+          <div className="im-card-label">Notes</div>
+          <textarea rows={2} placeholder="Optional..." value={form.notes || ''}
+            onChange={e => set('notes', e.target.value)} />
+        </div>
 
         <div className="modal-actions">
           {!isNew && (
             <button className="danger-btn" onClick={() => onDelete(form.id)}>
-              <Trash2 size={16} /> Delete
+              <Trash2 size={16} />
             </button>
           )}
           <button className="save-btn" style={{ '--c': meta.color }} onClick={save} disabled={!form.title.trim()}>
@@ -1954,7 +2170,7 @@ export default function App() {
 function GlobalStyle() {
   return (
     <style>{`
-      @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+      @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Fraunces:ital,wght@0,600;0,700;1,600;1,700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
 
       .mw-root {
         --bg: #0B0E1A;
@@ -2078,6 +2294,23 @@ function GlobalStyle() {
       .trailer-btn { display: flex; align-items: center; gap: 6px; padding: 12px 16px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
 
       /* ---------- My Shows ---------- */
+      .tabs-row { display: flex; gap: 8px; margin-bottom: 16px; }
+      .tab-btn { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 100px; font-size: 12.5px; font-weight: 700; color: var(--muted); background: var(--surface); border: 1px solid var(--border); }
+      .tab-btn.active { background: color-mix(in srgb, #7ED957 20%, var(--surface)); color: #7ED957; border-color: color-mix(in srgb, #7ED957 55%, transparent); }
+      .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
+      .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .upcoming-row { display: flex; justify-content: center; margin-bottom: 20px; }
+      .upcoming-circle { position: relative; width: 78px; height: 78px; border-radius: 50%; background: radial-gradient(circle at 30% 25%, color-mix(in srgb, #7ED957 30%, var(--surface)), var(--surface)); border: 1.5px solid color-mix(in srgb, #7ED957 45%, var(--border)); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: #7ED957; }
+      .upcoming-circle span:last-child { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; }
+      .upcoming-circle.active { background: #7ED957; color: #0B0E1A; box-shadow: 0 8px 22px rgba(126,217,87,0.35); }
+      .upcoming-badge { position: absolute; top: -2px; right: -2px; background: #7ED957; color: #0B0E1A; font-size: 11px; font-weight: 800; width: 22px; height: 22px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid var(--bg); }
+      .upcoming-item-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 9px 12px; margin-bottom: 10px; }
+      .upcoming-item-info { flex: 1; min-width: 0; }
+      .upcoming-item-title { font-family: 'Fraunces'; font-style: italic; font-weight: 700; font-size: 15px; margin-bottom: 3px; }
+      .upcoming-item-meta { font-size: 11.5px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+      .countdown-badge { flex-shrink: 0; text-align: center; background: var(--surface2); border-radius: 12px; padding: 7px 11px; }
+      .countdown-n { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 16px; line-height: 1; color: #7ED957; }
+      .countdown-u { font-size: 8.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 2px; }
       .type-tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
       .type-tile {
         display: flex; flex-direction: column; align-items: center; gap: 5px; padding: 14px 6px;
@@ -2198,6 +2431,29 @@ function GlobalStyle() {
       .segmented { display: flex; gap: 6px; margin-bottom: 14px; }
       .seg-btn { flex: 1; padding: 9px 4px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); font-size: 12.5px; font-weight: 600; color: var(--muted); }
       .seg-btn.active { color: var(--c); border-color: var(--c); background: color-mix(in srgb, var(--c) 16%, var(--surface2)); }
+      .seg-btn { display: flex; align-items: center; justify-content: center; gap: 5px; }
+      .seg-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+
+      .item-modal-v2 { position: relative; overflow: hidden; }
+      .im-glow { position: absolute; top: -100px; left: -70px; width: 280px; height: 280px; filter: blur(16px); pointer-events: none; z-index: 0; }
+      .im-hero { display: flex; gap: 14px; margin-bottom: 18px; position: relative; z-index: 1; }
+      .im-hero-poster { width: 84px; height: 124px; border-radius: 12px; overflow: hidden; flex-shrink: 0; box-shadow: 0 10px 26px rgba(0,0,0,0.5); background: linear-gradient(155deg, var(--surface2), var(--surface)); display: flex; align-items: center; justify-content: center; font-size: 28px; }
+      .im-hero-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .im-hero-info { display: flex; flex-direction: column; justify-content: center; gap: 8px; min-width: 0; }
+      .im-title { font-family: 'Fraunces', serif; font-style: italic; font-weight: 700; font-size: 23px; line-height: 1.15; }
+      .im-title-input { font-family: 'Fraunces', serif; font-style: italic; font-weight: 700; font-size: 20px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px; outline: none; color: var(--text); width: 100%; }
+      .im-card { position: relative; overflow: hidden; background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 14px 14px 14px 16px; margin-bottom: 12px; z-index: 1; }
+      .im-card-accent { position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+      .im-card-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 10px; }
+      .im-card-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+      .im-rating-value { font-family: 'JetBrains Mono'; font-weight: 700; font-size: 17px; color: #F5A623; }
+      .im-rating-value span { font-size: 11px; color: var(--muted); font-weight: 500; }
+      .im-inline-row { display: flex; align-items: center; justify-content: space-between; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border); }
+      .im-inline-row.two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; border-top: none; margin-top: 10px; padding-top: 0; }
+      .im-inline-label { font-size: 11px; color: var(--muted); margin-bottom: 5px; }
+      .im-runtime-input { display: flex; align-items: center; gap: 5px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 7px 11px; }
+      .im-runtime-input input { width: 40px; background: none; border: none; color: var(--text); font-family: 'JetBrains Mono'; font-size: 14px; font-weight: 700; text-align: right; outline: none; }
+      .im-runtime-input span { color: var(--muted); font-size: 11.5px; }
       .field-row { display: flex; gap: 10px; margin-bottom: 6px; }
       .field { flex: 1; }
       .field input, .modal input[type=number] { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; font-size: 14px; outline: none; }
@@ -2210,8 +2466,8 @@ function GlobalStyle() {
       .choice-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 12px; border-radius: 12px; background: color-mix(in srgb, var(--c) 16%, var(--surface2)); border: 1px solid var(--c); color: var(--c); font-weight: 700; font-size: 13px; }
       .choice-btn.watched { background: rgba(126,217,87,0.16); border-color: #7ED957; color: #7ED957; }
       .already-note { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 10px; padding: 12px; border-radius: 12px; background: rgba(126,217,87,0.12); color: #7ED957; font-weight: 700; font-size: 13px; }
-      .danger-btn { display: flex; align-items: center; gap: 6px; padding: 12px 14px; border-radius: 12px; background: rgba(255,107,107,0.12); border: 1px solid rgba(255,107,107,0.4); color: #FF8080; font-weight: 600; font-size: 13px; }
-      .save-btn { flex: 1; padding: 12px; border-radius: 12px; background: var(--c); color: #0B0E1A; font-weight: 700; font-size: 14px; }
+      .danger-btn { display: flex; align-items: center; justify-content: center; width: 52px; flex-shrink: 0; border-radius: 14px; background: linear-gradient(155deg, rgba(255,107,107,0.22), rgba(255,107,107,0.08)); border: 1px solid rgba(255,107,107,0.5); color: #FF6B6B; font-weight: 600; font-size: 13px; }
+      .save-btn { flex: 1; padding: 12px; border-radius: 14px; background: linear-gradient(135deg, var(--c), color-mix(in srgb, var(--c) 60%, white)); color: #0B0E1A; font-weight: 800; font-size: 14.5px; box-shadow: 0 8px 20px -6px color-mix(in srgb, var(--c) 60%, transparent); }
       .save-btn:disabled { opacity: 0.5; }
 
       @media (max-width: 360px) {
