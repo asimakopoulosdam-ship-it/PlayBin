@@ -297,7 +297,7 @@ async function fetchAnimeEpisodesPage(malId, page = 1) {
 // time made this noticeably slow. Page 1 tells us the total page count, so the rest
 // are fetched in small parallel batches instead (a gentle pace, to stay within
 // Jikan's rate limit rather than firing everything at once).
-async function fetchAnimeSeasons(malId) {
+async function fetchAnimeEpisodesForId(malId) {
   const first = await fetchAnimeEpisodesPage(malId, 1);
   let all = [...first.episodes];
   const lastPage = Math.min(first.lastPage, 20); // generous cap so even very long-running anime resolve fully
@@ -311,6 +311,57 @@ async function fetchAnimeSeasons(malId) {
     const results = await Promise.all(batch.map(p => fetchAnimeEpisodesPage(malId, p)));
     results.forEach(r => { all = all.concat(r.episodes); });
     if (i + BATCH_SIZE < remainingPages.length) await new Promise(r => setTimeout(r, 350));
+  }
+  return all;
+}
+
+async function fetchAnimeRelations(malId) {
+  try {
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/relations`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data.data || [];
+  } catch (e) { return []; }
+}
+
+// MAL splits each season of an anime into its own separate entry (e.g. "Re:Zero
+// Season 1" and "Re:Zero Season 2" are unrelated IDs, not one show with seasons)
+// unlike TMDB, which groups a TV show's seasons together automatically. This walks
+// MAL's own "Sequel"/"Prequel" links outward from whichever entry was added, so all
+// the connected seasons get merged into one combined view instead of just one part.
+async function resolveAnimeFranchiseIds(malId, maxHops = 6, maxIds = 8) {
+  const visited = new Set([malId]);
+  let frontier = [malId];
+  for (let hop = 0; hop < maxHops && frontier.length > 0 && visited.size < maxIds; hop++) {
+    const relationsList = await Promise.all(frontier.map(id => fetchAnimeRelations(id)));
+    const nextFrontier = [];
+    relationsList.forEach(relations => {
+      relations.forEach(rel => {
+        if (rel.relation === 'Sequel' || rel.relation === 'Prequel') {
+          (rel.entry || []).forEach(e => {
+            if (e.type === 'anime' && !visited.has(e.mal_id) && visited.size < maxIds) {
+              visited.add(e.mal_id);
+              nextFrontier.push(e.mal_id);
+            }
+          });
+        }
+      });
+    });
+    frontier = nextFrontier;
+    if (frontier.length > 0) await new Promise(r => setTimeout(r, 350)); // gentle pacing between hops
+  }
+  return Array.from(visited);
+}
+
+async function fetchAnimeSeasons(malId) {
+  const franchiseIds = await resolveAnimeFranchiseIds(malId);
+
+  let all = [];
+  for (let i = 0; i < franchiseIds.length; i++) {
+    try {
+      all = all.concat(await fetchAnimeEpisodesForId(franchiseIds[i]));
+    } catch (e) { /* skip an entry that fails rather than losing the whole list */ }
+    if (i < franchiseIds.length - 1) await new Promise(r => setTimeout(r, 300));
   }
 
   const byYear = {};
@@ -353,7 +404,11 @@ function searchScore(result, query) {
     else if (nt.includes(nq) || nq.includes(nt)) tier = 20;
   }
   const popBonus = Math.min(60, Math.log10((result.popularityScore || 0) + 1) * 20);
-  return tier + popBonus;
+  // When someone searches an anime name, they almost always mean the main TV series,
+  // not a side-movie or OVA that happens to share the name — nudge those down a bit
+  // rather than letting them outrank the series on popularity alone.
+  const subtypePenalty = (result.type === 'anime' && result.subtype && result.subtype !== 'TV') ? 15 : 0;
+  return tier + popBonus - subtypePenalty;
 }
 
 async function searchAllSources(q) {
@@ -574,6 +629,9 @@ function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
           </div>
           <div className="result-row-meta">
             {result.type === 'series' ? (result.statusText || result.year || '') : (result.year || '')}
+            {result.type === 'anime' && result.subtype && result.subtype !== 'TV' && (
+              <span className="chip chip-mini" style={{ '--c': '#F5A623' }}>{result.subtype}</span>
+            )}
             <ExternalStars value={result.ratingValue} source={result.ratingSource} size={11} />
           </div>
         </div>
@@ -2057,6 +2115,7 @@ function GlobalStyle() {
       .item-meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; flex-wrap: wrap; }
       .dim { color: var(--muted); font-size: 11.5px; }
       .chip { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 100px; color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); }
+      .chip-mini { font-size: 9px; padding: 1px 6px; }
       .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex-shrink: 0; }
       .poster { border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: linear-gradient(155deg, color-mix(in srgb, var(--c) 30%, var(--surface2)), var(--surface2)); border: 1px solid color-mix(in srgb, var(--c) 45%, var(--border)); }
       .poster img { width: 100%; height: 100%; object-fit: cover; }
