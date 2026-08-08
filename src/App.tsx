@@ -68,22 +68,20 @@ function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toS
 
 // Any modal/bottom-sheet calls this on mount. Without it, a touch that starts on the
 // sheet can end up scrolling the page behind it too (iOS Safari's default behavior),
-// which is exactly the "can't scroll, or the wrong thing scrolls" feeling.
+// which is exactly the "can't scroll, or the wrong thing scrolls" feeling. Deliberately
+// simple (no position:fixed trick) — that approach is known to sometimes fight with
+// iOS Safari's handling of nested scrollable elements, which is worse than this.
 function useBodyScrollLock() {
   useEffect(() => {
-    const scrollY = window.scrollY;
     const body = document.body;
-    const prev = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow };
-    body.style.position = 'fixed';
-    body.style.top = `-${scrollY}px`;
-    body.style.width = '100%';
+    const html = document.documentElement;
+    const prevBody = body.style.overflow;
+    const prevHtml = html.style.overflow;
     body.style.overflow = 'hidden';
+    html.style.overflow = 'hidden';
     return () => {
-      body.style.position = prev.position;
-      body.style.top = prev.top;
-      body.style.width = prev.width;
-      body.style.overflow = prev.overflow;
-      window.scrollTo(0, scrollY);
+      body.style.overflow = prevBody;
+      html.style.overflow = prevHtml;
     };
   }, []);
 }
