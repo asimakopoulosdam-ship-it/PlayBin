@@ -1570,6 +1570,13 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
   const isFromDb = !!form.externalId;
   const dbId = (form.externalId || '').split('-').slice(1).join('-');
 
+  // Items added before Description/Notes were split out still have the show's own
+  // synopsis sitting in "notes" — treat that as the description, and show Notes as
+  // empty until the person actually writes something, rather than asking them to
+  // delete and re-add anything.
+  const legacySummaryInNotes = isFromDb && !form.summary && !!form.notes;
+  const displaySummary = form.summary || (legacySummaryInNotes ? form.notes : '');
+
   const [seasons, setSeasons] = useState(null);
   const [loadingSeasons, setLoadingSeasons] = useState(false);
   const [similar, setSimilar] = useState(null);
@@ -1741,18 +1748,18 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
           </div>
         </div>
 
-        {isFromDb && form.summary && (
+        {isFromDb && displaySummary && (
           <div className="im-card">
             <div className="im-card-accent" style={{ background: '#4FA8FF' }} />
             <div className="im-card-label">Description</div>
-            <p className="im-description">{form.summary}</p>
+            <p className="im-description">{displaySummary}</p>
           </div>
         )}
 
         <div className="im-card">
           <div className="im-card-accent" style={{ background: meta.color }} />
           <div className="im-card-label">Notes</div>
-          <textarea rows={2} placeholder="Your own thoughts, optional..." value={form.notes || ''}
+          <textarea rows={2} placeholder="Your own thoughts, optional..." value={legacySummaryInNotes ? '' : (form.notes || '')}
             onChange={e => set('notes', e.target.value)} />
         </div>
 
@@ -2519,7 +2526,7 @@ function GlobalStyle() {
 
       /* ---------- Modal ---------- */
       .modal-backdrop { position: fixed; inset: 0; background: rgba(6,8,16,0.72); backdrop-filter: blur(3px); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
-      .modal { width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
+      .modal { width: 100%; max-width: 480px; max-height: 88vh; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
       .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
       .icon-x { width: 30px; height: 30px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
       .modal-title-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-size: 16px; font-weight: 600; outline: none; margin-bottom: 12px; }
