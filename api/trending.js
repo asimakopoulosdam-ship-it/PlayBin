@@ -1,11 +1,14 @@
 // Save this file as: api/trending.js  (inside the "api" folder at your project root)
 // Same idea as api/search.js, but for the "Trending now" list on Discover.
-// Cached for 6 hours since trending lists shift day to day, not minute to minute.
+// Supports ?page=N so Discover can keep loading more as you scroll, not just a fixed
+// first batch. Each page is cached separately for 6 hours since trending lists shift
+// day to day, not minute to minute.
 
 import { kv } from '@vercel/kv';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 const CACHE_SECONDS = 60 * 60 * 6; // 6 hours
+const PER_PAGE = 10; // per type, per page — 30 combined items per page
 
 function formatDateISOish(dateStr) {
   if (!dateStr) return null;
@@ -27,11 +30,11 @@ async function fetchWithRetry(url, retries = 2, delayMs = 900) {
   }
 }
 
-async function trendingMoviesLive(tmdbKey) {
-  const res = await fetchWithRetry(`https://api.themoviedb.org/3/trending/movie/week?api_key=${tmdbKey}&language=en-US`);
+async function trendingMoviesLive(tmdbKey, page) {
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/trending/movie/week?api_key=${tmdbKey}&language=en-US&page=${page}`);
   if (!res.ok) throw new Error('tmdb trending movie failed');
   const data = await res.json();
-  return (data.results || []).slice(0, 10).map(m => ({
+  return (data.results || []).slice(0, PER_PAGE).map(m => ({
     source: 'tmdb', type: 'movie', externalId: `tmdb-${m.id}`, tmdbId: m.id,
     title: m.title,
     year: m.release_date ? m.release_date.slice(0, 4) : null,
@@ -45,13 +48,13 @@ async function trendingMoviesLive(tmdbKey) {
   }));
 }
 
-async function trendingSeriesLive(tmdbKey) {
-  const res = await fetchWithRetry(`https://api.themoviedb.org/3/trending/tv/week?api_key=${tmdbKey}&language=en-US`);
+async function trendingSeriesLive(tmdbKey, page) {
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/trending/tv/week?api_key=${tmdbKey}&language=en-US&page=${page}`);
   if (!res.ok) throw new Error('tmdb trending tv failed');
   const data = await res.json();
   return (data.results || [])
     .filter(s => !(s.original_language === 'ja' && (s.genre_ids || []).includes(16)))
-    .slice(0, 10).map(s => ({
+    .slice(0, PER_PAGE).map(s => ({
       source: 'tmdb', type: 'series', externalId: `tmdbtv-${s.id}`, tmdbId: s.id,
       title: s.name,
       year: s.first_air_date ? s.first_air_date.slice(0, 4) : null,
@@ -65,8 +68,8 @@ async function trendingSeriesLive(tmdbKey) {
     }));
 }
 
-async function trendingAnimeLive() {
-  const res = await fetchWithRetry(`https://api.jikan.moe/v4/top/anime?filter=airing&limit=10`);
+async function trendingAnimeLive(page) {
+  const res = await fetchWithRetry(`https://api.jikan.moe/v4/top/anime?filter=airing&limit=${PER_PAGE}&page=${page}`);
   if (!res.ok) throw new Error('jikan trending failed');
   const data = await res.json();
   return (data.data || []).map(a => ({
@@ -84,17 +87,18 @@ async function trendingAnimeLive() {
 }
 
 export default async function handler(req, res) {
-  const cacheKey = 'trending:all';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const cacheKey = `trending:all:page:${page}`;
 
   try {
     const cached = await kv.get(cacheKey);
-    if (cached) return res.status(200).json({ results: cached, cached: true });
+    if (cached) return res.status(200).json({ results: cached, cached: true, page });
   } catch (e) { /* fall through */ }
 
   const [m, s, a] = await Promise.allSettled([
-    trendingMoviesLive(process.env.TMDB_API_KEY),
-    trendingSeriesLive(process.env.TMDB_API_KEY),
-    trendingAnimeLive(),
+    trendingMoviesLive(process.env.TMDB_API_KEY, page),
+    trendingSeriesLive(process.env.TMDB_API_KEY, page),
+    trendingAnimeLive(page),
   ]);
   const movie = m.status === 'fulfilled' ? m.value : [];
   const series = s.status === 'fulfilled' ? s.value : [];
@@ -116,5 +120,4 @@ export default async function handler(req, res) {
     await kv.set(cacheKey, combined, { ex: CACHE_SECONDS });
   } catch (e) { /* not fatal */ }
 
-  return res.status(200).json({ results: combined, cached: false });
-}
+  return res.status(200).json({ results: combined, cached: false, page });
