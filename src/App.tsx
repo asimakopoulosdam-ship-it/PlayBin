@@ -970,7 +970,6 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
   const [upcomingGlobal, setUpcomingGlobal] = useState(null);
   const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
   const debounceRef = useRef(null);
-  const trendingSentinelRef = useRef(null);
 
   useEffect(() => { loadSearchHistory().then(setHistory); }, []);
   useEffect(() => {
@@ -984,11 +983,9 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
     }
   }, [discoverTab]);
 
-  // Trending keeps loading more as you scroll near the bottom of the list, instead of
-  // stopping at a fixed first batch — watches a small marker element at the end of the
-  // list rather than listening to scroll position directly.
-  const loadMoreTrending = useCallback(async () => {
-    if (loadingMoreTrending || trendingExhausted || query.trim() || discoverTab !== 'search') return;
+  // A plain "Show more" button — simpler and more reliable than auto-loading on scroll.
+  const loadMoreTrending = async () => {
+    if (loadingMoreTrending || trendingExhausted) return;
     setLoadingMoreTrending(true);
     const nextPage = trendingPage + 1;
     try {
@@ -1004,17 +1001,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
       }
     } catch (e) { setTrendingExhausted(true); }
     setLoadingMoreTrending(false);
-  }, [loadingMoreTrending, trendingExhausted, trendingPage, query, discoverTab]);
-
-  useEffect(() => {
-    const el = trendingSentinelRef.current;
-    if (!el) return;
-    const observer = new IntersectionObserver((entries) => {
-      if (entries[0].isIntersecting) loadMoreTrending();
-    }, { rootMargin: '400px' });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [loadMoreTrending]);
+  };
 
   const addToHistory = (q) => {
     setHistory(h => {
@@ -1141,8 +1128,11 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
                   />
                 ))}
               </div>
-              <div ref={trendingSentinelRef} style={{ height: 1 }} />
-              {loadingMoreTrending && <p className="dim" style={{ padding: '10px 2px', textAlign: 'center' }}>Loading more…</p>}
+              {!trendingExhausted && (
+                <button className="show-more-btn" onClick={loadMoreTrending} disabled={loadingMoreTrending}>
+                  {loadingMoreTrending ? <Loader2 size={15} className="spin" /> : 'Show more'}
+                </button>
+              )}
               {trendingExhausted && <p className="dim" style={{ padding: '10px 2px', textAlign: 'center' }}>That's everything for now.</p>}
             </>
           ) : (
@@ -2565,6 +2555,8 @@ function GlobalStyle() {
       .tabs-row .tab-btn { flex-shrink: 0; }
       .tab-btn { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 100px; font-size: 12.5px; font-weight: 700; color: var(--muted); background: var(--surface); border: 1px solid var(--border); }
       .tab-btn.active { background: color-mix(in srgb, #7ED957 20%, var(--surface)); color: #7ED957; border-color: color-mix(in srgb, #7ED957 55%, transparent); }
+      .show-more-btn { display: flex; align-items: center; justify-content: center; width: 100%; margin-top: 12px; padding: 11px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); color: #7ED957; font-weight: 700; font-size: 13.5px; }
+      .show-more-btn:disabled { opacity: 0.6; }
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
       .upcoming-row { display: flex; justify-content: center; margin-bottom: 20px; }
