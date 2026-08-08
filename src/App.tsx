@@ -267,6 +267,53 @@ async function fetchTrendingAll() {
 }
 
 
+// "You might also like" — same idea across sources, mapped into the same shape as
+// search results so the existing add-to-library flow works on them unchanged.
+async function fetchSimilarTitles(item) {
+  if (!item.externalId) return [];
+  const dbId = item.externalId.split('-').slice(1).join('-');
+  try {
+    if (item.type === 'movie') {
+      const res = await fetch(`https://api.themoviedb.org/3/movie/${dbId}/similar?api_key=${TMDB_API_KEY}&language=en-US`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.results || []).slice(0, 8).map(m => ({
+        type: 'movie', externalId: `tmdb-${m.id}`, title: m.title,
+        posterUrl: m.poster_path ? `${TMDB_IMG}${m.poster_path}` : null,
+        year: m.release_date ? m.release_date.slice(0, 4) : null,
+        summary: m.overview || '', ratingValue: m.vote_average || null, ratingSource: 'TMDB',
+        popularityScore: m.popularity || 0, episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null, needsDetail: true,
+      }));
+    }
+    if (item.type === 'series') {
+      const res = await fetch(`https://api.themoviedb.org/3/tv/${dbId}/similar?api_key=${TMDB_API_KEY}&language=en-US`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.results || [])
+        .filter(s => !(s.original_language === 'ja' && (s.genre_ids || []).includes(16)))
+        .slice(0, 8).map(s => ({
+          type: 'series', externalId: `tmdbtv-${s.id}`, title: s.name,
+          posterUrl: s.poster_path ? `${TMDB_IMG}${s.poster_path}` : null,
+          year: s.first_air_date ? s.first_air_date.slice(0, 4) : null,
+          summary: s.overview || '', ratingValue: s.vote_average || null, ratingSource: 'TMDB',
+          popularityScore: s.popularity || 0, episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null, needsDetail: true,
+        }));
+    }
+    if (item.type === 'anime') {
+      const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}/recommendations`);
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.data || []).slice(0, 8).map(r => ({
+        type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
+        posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
+        year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
+        episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
+      }));
+    }
+  } catch (e) { return []; }
+  return [];
+}
+
 async function fetchMovieDetail(tmdbId) {
   const res = await fetch(`https://api.themoviedb.org/3/movie/${tmdbId}?api_key=${TMDB_API_KEY}&language=en-US&append_to_response=videos`);
   if (!res.ok) throw new Error('tmdb detail');
@@ -1514,7 +1561,7 @@ function TimeChip({ n, u }) {
 
 /* ---------------------------------- Add / Edit modal ---------------------------------- */
 
-function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
+function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAdd }) {
   useBodyScrollLock();
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
@@ -1525,7 +1572,17 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
 
   const [seasons, setSeasons] = useState(null);
   const [loadingSeasons, setLoadingSeasons] = useState(false);
+  const [similar, setSimilar] = useState(null);
+  const [addedSimilar, setAddedSimilar] = useState(() => new Set());
   const watchedSet = new Set(form.watchedEpisodeIds || []);
+
+  useEffect(() => {
+    if (isFromDb) {
+      let cancelled = false;
+      fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
+      return () => { cancelled = true; };
+    }
+  }, [form.id]);
 
   useEffect(() => {
     if (isFromDb && form.type !== 'movie' && dbId) {
@@ -1684,10 +1741,18 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
           </div>
         </div>
 
+        {isFromDb && form.summary && (
+          <div className="im-card">
+            <div className="im-card-accent" style={{ background: '#4FA8FF' }} />
+            <div className="im-card-label">Description</div>
+            <p className="im-description">{form.summary}</p>
+          </div>
+        )}
+
         <div className="im-card">
           <div className="im-card-accent" style={{ background: meta.color }} />
           <div className="im-card-label">Notes</div>
-          <textarea rows={2} placeholder="Optional..." value={form.notes || ''}
+          <textarea rows={2} placeholder="Your own thoughts, optional..." value={form.notes || ''}
             onChange={e => set('notes', e.target.value)} />
         </div>
 
@@ -1701,6 +1766,32 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
             Save
           </button>
         </div>
+
+        {isFromDb && similar && similar.length > 0 && (
+          <div className="im-similar-section">
+            <div className="im-card-label" style={{ marginTop: 4 }}>You might also like</div>
+            <div className="similar-scroll">
+              {similar.map(s => {
+                const already = addedSimilar.has(s.externalId);
+                return (
+                  <div key={s.externalId} className="similar-card">
+                    <div className="similar-poster">
+                      {s.posterUrl ? <img src={s.posterUrl} alt="" /> : <Film size={18} />}
+                    </div>
+                    <div className="similar-title">{s.title}</div>
+                    <button
+                      className="similar-add"
+                      disabled={already}
+                      onClick={() => { onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
+                    >
+                      {already ? <Check size={13} /> : <Plus size={13} />}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2077,7 +2168,8 @@ export default function App() {
       externalRating: result.ratingValue || null,
       externalRatingSource: result.ratingSource || null,
       watchedEpisodeIds,
-      notes: (result.summary || '').slice(0, 220),
+      summary: result.summary || '', // the show's own synopsis — kept separate from the user's own notes
+      notes: '',
       dateAdded: now, dateWatched: status === 'completed' ? now : null,
     };
     persist([...items, newItem]);
@@ -2184,7 +2276,8 @@ export default function App() {
 
       {modal && (
         <ItemModal draft={modal} onClose={() => setModal(null)} onSave={upsertItem} onDelete={deleteItem}
-          onOpenEpisodes={(item, season) => { setEpisodesItem(item); setPresetSeason(season || null); }} />
+          onOpenEpisodes={(item, season) => { setEpisodesItem(item); setPresetSeason(season || null); }}
+          onQuickAdd={quickAddFromResult} />
       )}
 
       {episodesItem && (
@@ -2426,7 +2519,7 @@ function GlobalStyle() {
 
       /* ---------- Modal ---------- */
       .modal-backdrop { position: fixed; inset: 0; background: rgba(6,8,16,0.72); backdrop-filter: blur(3px); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
-      .modal { width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
+      .modal { width: 100%; max-width: 480px; max-height: 88vh; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
       .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
       .icon-x { width: 30px; height: 30px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
       .modal-title-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-size: 16px; font-weight: 600; outline: none; margin-bottom: 12px; }
@@ -2490,6 +2583,15 @@ function GlobalStyle() {
       .im-runtime-input { display: flex; align-items: center; gap: 5px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 7px 11px; }
       .im-runtime-input input { width: 40px; background: none; border: none; color: var(--text); font-family: 'JetBrains Mono'; font-size: 14px; font-weight: 700; text-align: right; outline: none; }
       .im-runtime-input span { color: var(--muted); font-size: 11.5px; }
+      .im-description { font-size: 13.5px; line-height: 1.6; color: var(--muted); margin: 0; }
+      .im-similar-section { margin-top: 18px; }
+      .similar-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
+      .similar-card { flex-shrink: 0; width: 92px; position: relative; }
+      .similar-poster { width: 92px; height: 130px; border-radius: 10px; overflow: hidden; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
+      .similar-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .similar-title { font-size: 11.5px; font-weight: 600; margin-top: 6px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .similar-add { position: absolute; top: 6px; right: 6px; width: 24px; height: 24px; border-radius: 50%; background: rgba(11,14,26,0.85); border: 1px solid var(--border); color: var(--text); display: flex; align-items: center; justify-content: center; }
+      .similar-add:disabled { color: #7ED957; border-color: #7ED957; }
       .field-row { display: flex; gap: 10px; margin-bottom: 6px; }
       .field { flex: 1; }
       .field input, .modal input[type=number] { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 10px; font-size: 14px; outline: none; }
