@@ -257,8 +257,9 @@ async function fetchSeriesDetail(tmdbId) {
 
 // Trending Now — what's popular this week, shown when the search box is empty.
 // Also routed through the cache (api/trending.js), refreshed every ~6 hours server-side.
-async function fetchTrendingAll() {
-  const res = await fetch('/api/trending');
+// Supports paging so Discover can keep loading more as you scroll down.
+async function fetchTrendingAll(page = 1) {
+  const res = await fetch(`/api/trending?page=${page}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.results || [];
@@ -963,13 +964,17 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
   const [history, setHistory] = useState([]);
   const [trending, setTrending] = useState(null);
   const [trendingLoading, setTrendingLoading] = useState(true);
+  const [trendingPage, setTrendingPage] = useState(1);
+  const [loadingMoreTrending, setLoadingMoreTrending] = useState(false);
+  const [trendingExhausted, setTrendingExhausted] = useState(false);
   const [upcomingGlobal, setUpcomingGlobal] = useState(null);
   const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
   const debounceRef = useRef(null);
+  const trendingSentinelRef = useRef(null);
 
   useEffect(() => { loadSearchHistory().then(setHistory); }, []);
   useEffect(() => {
-    fetchTrendingAll().then(setTrending).catch(() => setTrending([])).finally(() => setTrendingLoading(false));
+    fetchTrendingAll(1).then(setTrending).catch(() => setTrending([])).finally(() => setTrendingLoading(false));
   }, []);
   useEffect(() => {
     if (discoverTab === 'upcoming' && upcomingGlobal === null && !loadingUpcomingGlobal) {
@@ -978,6 +983,38 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
         .catch(() => setUpcomingGlobal([])).finally(() => setLoadingUpcomingGlobal(false));
     }
   }, [discoverTab]);
+
+  // Trending keeps loading more as you scroll near the bottom of the list, instead of
+  // stopping at a fixed first batch — watches a small marker element at the end of the
+  // list rather than listening to scroll position directly.
+  const loadMoreTrending = useCallback(async () => {
+    if (loadingMoreTrending || trendingExhausted || query.trim() || discoverTab !== 'search') return;
+    setLoadingMoreTrending(true);
+    const nextPage = trendingPage + 1;
+    try {
+      const more = await fetchTrendingAll(nextPage);
+      if (more.length === 0) setTrendingExhausted(true);
+      else {
+        setTrending(prev => {
+          const existingIds = new Set((prev || []).map(r => r.externalId));
+          const deduped = more.filter(r => !existingIds.has(r.externalId));
+          return [...(prev || []), ...deduped];
+        });
+        setTrendingPage(nextPage);
+      }
+    } catch (e) { setTrendingExhausted(true); }
+    setLoadingMoreTrending(false);
+  }, [loadingMoreTrending, trendingExhausted, trendingPage, query, discoverTab]);
+
+  useEffect(() => {
+    const el = trendingSentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0].isIntersecting) loadMoreTrending();
+    }, { rootMargin: '400px' });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [loadMoreTrending]);
 
   const addToHistory = (q) => {
     setHistory(h => {
@@ -1092,17 +1129,22 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           {trendingLoading ? (
             <p className="dim" style={{ padding: '4px 2px' }}>Loading…</p>
           ) : trending && trending.filter(r => typeFilter === 'all' || r.type === typeFilter).length > 0 ? (
-            <div className="result-list">
-              {trending.filter(r => typeFilter === 'all' || r.type === typeFilter).map(r => (
-                <ResultRow
-                  key={r.externalId}
-                  result={r}
-                  inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                  onOpen={openResult}
-                  onQuickAdd={onQuickAdd}
-                />
-              ))}
-            </div>
+            <>
+              <div className="result-list">
+                {trending.filter(r => typeFilter === 'all' || r.type === typeFilter).map(r => (
+                  <ResultRow
+                    key={r.externalId}
+                    result={r}
+                    inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
+                    onOpen={openResult}
+                    onQuickAdd={onQuickAdd}
+                  />
+                ))}
+              </div>
+              <div ref={trendingSentinelRef} style={{ height: 1 }} />
+              {loadingMoreTrending && <p className="dim" style={{ padding: '10px 2px', textAlign: 'center' }}>Loading more…</p>}
+              {trendingExhausted && <p className="dim" style={{ padding: '10px 2px', textAlign: 'center' }}>That's everything for now.</p>}
+            </>
           ) : (
             <p className="dim" style={{ padding: '4px 2px' }}>Couldn't load trending titles right now.</p>
           )}
