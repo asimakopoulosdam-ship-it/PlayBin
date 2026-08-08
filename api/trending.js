@@ -1,10 +1,23 @@
 // Save this file as: api/trending.js  (inside the "api" folder at your project root)
 // Same idea as api/search.js, but for the "Trending now" list on Discover.
 // Supports ?page=N so Discover can keep loading more as you scroll, not just a fixed
-// first batch. Each page is cached separately for 6 hours since trending lists shift
-// day to day, not minute to minute.
+// first batch.
+//
+// FIX: each category (movie / series / anime) is now cached SEPARATELY instead of
+// caching the combined result as one block. Before, if Jikan (anime) failed even
+// once while TMDB succeeded, the empty anime list still got cached together with
+// movie+series for 6 hours — so the Anime tab showed nothing until the cache expired,
+// even after Jikan came back. Now a failure in one category never affects the others,
+// and only the failed category is retried live on the next request.
 
-import { kv } from '@vercel/kv';
+// Loaded dynamically and defensively — if @vercel/kv isn't installed correctly for any
+// reason, the whole function must not crash. Caching just becomes a no-op instead.
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 const CACHE_SECONDS = 60 * 60 * 6; // 6 hours
@@ -86,23 +99,41 @@ async function trendingAnimeLive(page) {
   }));
 }
 
+// Fetches ONE category, trying the cache first, falling back to a live fetch, and
+// caching only that category on success. A failure here returns [] without ever
+// touching the cache — so a bad Jikan moment never gets "locked in" for 6 hours,
+// and the next request will simply try Jikan live again.
+async function getCategory(kv, cacheKey, liveFn) {
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) return { list: cached, cached: true };
+    } catch (e) { /* fall through to live */ }
+  }
+  try {
+    const list = await liveFn();
+    if (kv && list.length > 0) {
+      try { await kv.set(cacheKey, list, { ex: CACHE_SECONDS }); } catch (e) { /* not fatal */ }
+    }
+    return { list, cached: false };
+  } catch (e) {
+    return { list: [], cached: false, failed: true };
+  }
+}
+
 export default async function handler(req, res) {
   const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-  const cacheKey = `trending:all:page:${page}`;
+  const kv = await getKv();
 
-  try {
-    const cached = await kv.get(cacheKey);
-    if (cached) return res.status(200).json({ results: cached, cached: true, page });
-  } catch (e) { /* fall through */ }
-
-  const [m, s, a] = await Promise.allSettled([
-    trendingMoviesLive(process.env.TMDB_API_KEY, page),
-    trendingSeriesLive(process.env.TMDB_API_KEY, page),
-    trendingAnimeLive(page),
+  const [movieR, seriesR, animeR] = await Promise.all([
+    getCategory(kv, `trending:movie:page:${page}`, () => trendingMoviesLive(process.env.TMDB_API_KEY, page)),
+    getCategory(kv, `trending:series:page:${page}`, () => trendingSeriesLive(process.env.TMDB_API_KEY, page)),
+    getCategory(kv, `trending:anime:page:${page}`, () => trendingAnimeLive(page)),
   ]);
-  const movie = m.status === 'fulfilled' ? m.value : [];
-  const series = s.status === 'fulfilled' ? s.value : [];
-  const anime = a.status === 'fulfilled' ? a.value : [];
+
+  const movie = movieR.list;
+  const series = seriesR.list;
+  const anime = animeR.list;
 
   const combined = [];
   const max = Math.max(movie.length, series.length, anime.length);
@@ -116,9 +147,9 @@ export default async function handler(req, res) {
     return res.status(502).json({ error: 'Upstream sources unavailable right now' });
   }
 
-  try {
-    await kv.set(cacheKey, combined, { ex: CACHE_SECONDS });
-  } catch (e) { /* not fatal */ }
-
-  return res.status(200).json({ results: combined, cached: false, page });
+  return res.status(200).json({
+    results: combined,
+    page,
+    cached: { movie: movieR.cached, series: seriesR.cached, anime: animeR.cached },
+  });
 }
