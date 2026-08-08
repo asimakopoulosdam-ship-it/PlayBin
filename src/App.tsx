@@ -2263,11 +2263,41 @@ export default function App() {
   };
   const openExisting = (item) => setModal({ ...item });
 
+  // Before adding an anime, check whether it's really just another part of a Bleach/
+  // Re:Zero-style franchise you already have — otherwise "Season 2022" and "Season
+  // 2004" of the same show could end up as two separate library items, silently
+  // doubling your watch-time stats.
+  const findExistingFranchiseItem = async (result) => {
+    if (result.type !== 'anime' || !result.externalId) return null;
+    const existingAnime = items.filter(i => i.type === 'anime' && i.externalId);
+    if (existingAnime.length === 0) return null;
+    const dbId = result.externalId.split('-').slice(1).join('-');
+    try {
+      let relatedExternalIds = [];
+      if (result.externalId.startsWith('jikan-')) {
+        const ids = await resolveAnimeFranchiseIds(dbId);
+        relatedExternalIds = ids.map(id => `jikan-${id}`);
+      } else if (result.externalId.startsWith('anilist-')) {
+        const entries = await resolveAniListFranchiseIds(dbId);
+        relatedExternalIds = entries.map(e => `anilist-${e.id}`);
+      }
+      const relatedSet = new Set(relatedExternalIds);
+      return existingAnime.find(i => relatedSet.has(i.externalId)) || null;
+    } catch (e) { return null; }
+  };
+
   // One-tap add straight from a search result — mirrors the "Add Show / Add Movie" pattern,
   // no form to fill in. status defaults to 'planned' (from the row's quick-add +) but the
   // detail sheet can pass 'completed' for "I've watched it" straight away.
   const quickAddFromResult = async (result, status = 'planned') => {
     const type = TYPE_META[result.type] ? result.type : 'movie';
+
+    const existingFranchiseItem = await findExistingFranchiseItem(result);
+    if (existingFranchiseItem) {
+      openExisting(existingFranchiseItem);
+      return existingFranchiseItem;
+    }
+
     const now = new Date().toISOString();
     const isEpisodic = type !== 'movie';
     let watchedEpisodeIds = [];
