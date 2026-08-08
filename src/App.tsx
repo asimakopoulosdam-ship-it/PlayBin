@@ -1596,7 +1596,7 @@ function TimeChip({ n, u }) {
 
 /* ---------------------------------- Add / Edit modal ---------------------------------- */
 
-function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAdd }) {
+function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAdd, items }) {
   useBodyScrollLock();
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
@@ -1604,6 +1604,14 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
   const isNew = !draft.id || draft.__isNew;
   const isFromDb = !!form.externalId;
   const dbId = (form.externalId || '').split('-').slice(1).join('-');
+
+  // Tapping a "You might also like" card opens it here, on top of this modal — a small
+  // stack so going a level deeper (that title's own recommendations) and back works
+  // the same way it does from Discover, instead of just closing everything.
+  const [similarStack, setSimilarStack] = useState([]);
+  const activeSimilarResult = similarStack.length > 0 ? similarStack[similarStack.length - 1] : null;
+  const openSimilarResult = (result) => setSimilarStack(stack => [...stack, result]);
+  const closeSimilarResult = () => setSimilarStack(stack => stack.slice(0, -1));
 
   // Items added before Description/Notes were split out still have the show's own
   // synopsis sitting in "notes" — treat that as the description, and show Notes as
@@ -1830,7 +1838,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
               {similar.map(s => {
                 const already = addedSimilar.has(s.externalId);
                 return (
-                  <div key={s.externalId} className="similar-card">
+                  <div key={s.externalId} className="similar-card" onClick={() => openSimilarResult(s)}>
                     <div className="similar-poster">
                       {s.posterUrl ? <img src={s.posterUrl} alt="" /> : <Film size={18} />}
                     </div>
@@ -1838,7 +1846,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
                     <button
                       className="similar-add"
                       disabled={already}
-                      onClick={() => { onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
+                      onClick={(e) => { e.stopPropagation(); onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
                     >
                       {already ? <Check size={13} /> : <Plus size={13} />}
                     </button>
@@ -1847,6 +1855,19 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
               })}
             </div>
           </div>
+        )}
+
+        {activeSimilarResult && (
+          <ResultDetailSheet
+            key={activeSimilarResult.externalId}
+            result={activeSimilarResult}
+            items={items || []}
+            onClose={closeSimilarResult}
+            onAdd={(detail, status) => { onQuickAdd(detail, status); setSimilarStack([]); }}
+            onOpenEpisodes={onOpenEpisodes}
+            onQuickAdd={onQuickAdd}
+            onOpenResult={openSimilarResult}
+          />
         )}
       </div>
     </div>
@@ -2333,7 +2354,7 @@ export default function App() {
       {modal && (
         <ItemModal draft={modal} onClose={() => setModal(null)} onSave={upsertItem} onDelete={deleteItem}
           onOpenEpisodes={(item, season) => { setEpisodesItem(item); setPresetSeason(season || null); }}
-          onQuickAdd={quickAddFromResult} />
+          onQuickAdd={quickAddFromResult} items={items} />
       )}
 
       {episodesItem && (
