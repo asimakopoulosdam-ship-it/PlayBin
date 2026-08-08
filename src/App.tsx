@@ -948,6 +948,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
 
 function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName }) {
   const [discoverTab, setDiscoverTab] = useState('search'); // 'search' | 'upcoming'
+  const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'movie' | 'series' | 'anime' — applies while in Search
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
@@ -1018,7 +1019,12 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
     setResultStack([]);
   };
 
-  const hasAnyResults = results && (results.series.length || results.anime.length || results.movie.length);
+  const filteredResultsCount = results
+    ? (typeFilter === 'all' || typeFilter === 'movie' ? results.movie.length : 0)
+      + (typeFilter === 'all' || typeFilter === 'series' ? results.series.length : 0)
+      + (typeFilter === 'all' || typeFilter === 'anime' ? results.anime.length : 0)
+    : 0;
+  const hasAnyResults = results && filteredResultsCount > 0;
 
   return (
     <div className="screen discover-screen">
@@ -1031,11 +1037,20 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
       </div>
 
       <div className="tabs-row">
-        <button className={`tab-btn ${discoverTab === 'search' ? 'active' : ''}`} onClick={() => setDiscoverTab('search')}>
+        <button className={`tab-btn ${discoverTab === 'search' && typeFilter === 'all' ? 'active' : ''}`} onClick={() => { setDiscoverTab('search'); setTypeFilter('all'); }}>
           <Search size={14} /> Search
         </button>
         <button className={`tab-btn ${discoverTab === 'upcoming' ? 'active' : ''}`} onClick={() => setDiscoverTab('upcoming')}>
           <CalendarDays size={14} /> Upcoming
+        </button>
+        <button className={`tab-btn ${discoverTab === 'search' && typeFilter === 'movie' ? 'active' : ''}`} onClick={() => { setDiscoverTab('search'); setTypeFilter('movie'); }}>
+          <Film size={14} /> Movies
+        </button>
+        <button className={`tab-btn ${discoverTab === 'search' && typeFilter === 'series' ? 'active' : ''}`} onClick={() => { setDiscoverTab('search'); setTypeFilter('series'); }}>
+          <Tv2 size={14} /> Series
+        </button>
+        <button className={`tab-btn ${discoverTab === 'search' && typeFilter === 'anime' ? 'active' : ''}`} onClick={() => { setDiscoverTab('search'); setTypeFilter('anime'); }}>
+          <Sparkles size={14} /> Anime
         </button>
       </div>
 
@@ -1076,9 +1091,9 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           <div className="group-title" style={{ color: '#7ED957' }}>Trending now</div>
           {trendingLoading ? (
             <p className="dim" style={{ padding: '4px 2px' }}>Loading…</p>
-          ) : trending && trending.length > 0 ? (
+          ) : trending && trending.filter(r => typeFilter === 'all' || r.type === typeFilter).length > 0 ? (
             <div className="result-list">
-              {trending.map(r => (
+              {trending.filter(r => typeFilter === 'all' || r.type === typeFilter).map(r => (
                 <ResultRow
                   key={r.externalId}
                   result={r}
@@ -1113,7 +1128,11 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
         <div className="group" style={{ marginTop: 16 }}>
           <div className="group-title" style={{ color: '#7ED957' }}>Results</div>
           <div className="result-list">
-            {[...results.movie, ...results.series, ...results.anime]
+            {[
+              ...(typeFilter === 'all' || typeFilter === 'movie' ? results.movie : []),
+              ...(typeFilter === 'all' || typeFilter === 'series' ? results.series : []),
+              ...(typeFilter === 'all' || typeFilter === 'anime' ? results.anime : []),
+            ]
               .sort((a, b) => searchScore(b, query) - searchScore(a, query))
               .map(r => (
                 <ResultRow
@@ -2500,7 +2519,8 @@ function GlobalStyle() {
       .trailer-btn { display: flex; align-items: center; gap: 6px; padding: 12px 16px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
 
       /* ---------- My Shows ---------- */
-      .tabs-row { display: flex; gap: 8px; margin-bottom: 16px; }
+      .tabs-row { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
+      .tabs-row .tab-btn { flex-shrink: 0; }
       .tab-btn { display: flex; align-items: center; gap: 6px; padding: 9px 16px; border-radius: 100px; font-size: 12.5px; font-weight: 700; color: var(--muted); background: var(--surface); border: 1px solid var(--border); }
       .tab-btn.active { background: color-mix(in srgb, #7ED957 20%, var(--surface)); color: #7ED957; border-color: color-mix(in srgb, #7ED957 55%, transparent); }
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
