@@ -510,24 +510,72 @@ async function fetchAnimeSeasons(malId) {
 }
 
 // AniList only shows up for anime Jikan couldn't answer (see the search fallback) —
-// it doesn't expose a rich per-episode title list the way Jikan does, so this builds
-// a simple numbered checklist from the total episode count instead. Less detail, but
-// still fully usable for tracking what's been watched.
+// it doesn't expose a rich per-episode title list the way Jikan does, so each related
+// entry becomes a simple numbered checklist from its own episode count. Less detail
+// per episode, but the seasons still get merged together, same idea as the Jikan side.
+async function fetchAniListMediaInfo(anilistId) {
+  const query = `query ($id: Int) { Media(id: $id, type: ANIME) { id episodes title { romaji english } startDate { year } relations { edges { relationType node { id type format } } } } }`;
+  const res = await fetch('https://graphql.anilist.co', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
+  });
+  const data = await res.json();
+  return (data.data && data.data.Media) || null;
+}
+
+async function resolveAniListFranchiseIds(anilistId, maxHops = 6, maxIds = 8) {
+  const visited = new Set([Number(anilistId)]);
+  const infoById = new Map();
+  let frontier = [Number(anilistId)];
+  for (let hop = 0; hop < maxHops && frontier.length > 0 && visited.size < maxIds; hop++) {
+    const infos = await Promise.all(frontier.map(id => fetchAniListMediaInfo(id).catch(() => null)));
+    const nextFrontier = [];
+    infos.forEach(info => {
+      if (!info) return;
+      infoById.set(info.id, info);
+      (info.relations && info.relations.edges || []).forEach(edge => {
+        if ((edge.relationType === 'SEQUEL' || edge.relationType === 'PREQUEL')
+          && edge.node && edge.node.type === 'ANIME' && edge.node.format !== 'MOVIE'
+          && !visited.has(edge.node.id) && visited.size < maxIds) {
+          visited.add(edge.node.id);
+          nextFrontier.push(edge.node.id);
+        }
+      });
+    });
+    frontier = nextFrontier;
+    if (frontier.length > 0) await new Promise(r => setTimeout(r, 300));
+  }
+  // The starting entry's own info might not be fetched yet if it had no relations checked this loop.
+  if (!infoById.has(Number(anilistId))) {
+    const info = await fetchAniListMediaInfo(anilistId).catch(() => null);
+    if (info) infoById.set(info.id, info);
+  }
+  return Array.from(infoById.values());
+}
+
 async function fetchAnimeSeasonsAniList(anilistId, totalEpisodesHint) {
   try {
-    const query = `query ($id: Int) { Media(id: $id, type: ANIME) { episodes } }`;
-    const res = await fetch('https://graphql.anilist.co', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
-    });
-    const data = await res.json();
-    const total = (data.data && data.data.Media && data.data.Media.episodes) || totalEpisodesHint || 0;
-    if (!total) return [];
-    const episodes = Array.from({ length: total }, (_, i) => ({
-      id: `anilistep${anilistId}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null,
-    }));
-    return [{ seasonNumber: 1, episodes }];
+    const relatedEntries = await resolveAniListFranchiseIds(anilistId);
+    const base = relatedEntries.length > 0 ? relatedEntries : null;
+    if (!base) {
+      const info = await fetchAniListMediaInfo(anilistId).catch(() => null);
+      const total = (info && info.episodes) || totalEpisodesHint || 0;
+      if (!total) return [];
+      return [{ seasonNumber: 1, episodes: Array.from({ length: total }, (_, i) => ({ id: `anilistep${anilistId}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null })) }];
+    }
+    const seasons = base
+      .sort((a, b) => ((a.startDate && a.startDate.year) || 0) - ((b.startDate && b.startDate.year) || 0))
+      .map(entry => {
+        const total = entry.episodes || 0;
+        const label = (entry.startDate && entry.startDate.year) || (entry.title && (entry.title.english || entry.title.romaji)) || entry.id;
+        return {
+          seasonNumber: label,
+          episodes: Array.from({ length: total }, (_, i) => ({ id: `anilistep${entry.id}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null })),
+        };
+      })
+      .filter(s => s.episodes.length > 0);
+    return seasons;
   } catch (e) { return []; }
 }
 
