@@ -457,45 +457,8 @@ async function fetchAnimeRelations(malId) {
   } catch (e) { return []; }
 }
 
-// MAL splits each season of an anime into its own separate entry (e.g. "Re:Zero
-// Season 1" and "Re:Zero Season 2" are unrelated IDs, not one show with seasons)
-// unlike TMDB, which groups a TV show's seasons together automatically. This walks
-// MAL's own "Sequel"/"Prequel" links outward from whichever entry was added, so all
-// the connected seasons get merged into one combined view instead of just one part.
-async function resolveAnimeFranchiseIds(malId, maxHops = 6, maxIds = 8) {
-  const visited = new Set([malId]);
-  let frontier = [malId];
-  for (let hop = 0; hop < maxHops && frontier.length > 0 && visited.size < maxIds; hop++) {
-    const relationsList = await Promise.all(frontier.map(id => fetchAnimeRelations(id)));
-    const nextFrontier = [];
-    relationsList.forEach(relations => {
-      relations.forEach(rel => {
-        if (rel.relation === 'Sequel' || rel.relation === 'Prequel') {
-          (rel.entry || []).forEach(e => {
-            if (e.type === 'anime' && !visited.has(e.mal_id) && visited.size < maxIds) {
-              visited.add(e.mal_id);
-              nextFrontier.push(e.mal_id);
-            }
-          });
-        }
-      });
-    });
-    frontier = nextFrontier;
-    if (frontier.length > 0) await new Promise(r => setTimeout(r, 350)); // gentle pacing between hops
-  }
-  return Array.from(visited);
-}
-
 async function fetchAnimeSeasons(malId) {
-  const franchiseIds = await resolveAnimeFranchiseIds(malId);
-
-  let all = [];
-  for (let i = 0; i < franchiseIds.length; i++) {
-    try {
-      all = all.concat(await fetchAnimeEpisodesForId(franchiseIds[i]));
-    } catch (e) { /* skip an entry that fails rather than losing the whole list */ }
-    if (i < franchiseIds.length - 1) await new Promise(r => setTimeout(r, 300));
-  }
+  const all = await fetchAnimeEpisodesForId(malId);
 
   const byYear = {};
   all.forEach(e => {
@@ -524,58 +487,12 @@ async function fetchAniListMediaInfo(anilistId) {
   return (data.data && data.data.Media) || null;
 }
 
-async function resolveAniListFranchiseIds(anilistId, maxHops = 6, maxIds = 8) {
-  const visited = new Set([Number(anilistId)]);
-  const infoById = new Map();
-  let frontier = [Number(anilistId)];
-  for (let hop = 0; hop < maxHops && frontier.length > 0 && visited.size < maxIds; hop++) {
-    const infos = await Promise.all(frontier.map(id => fetchAniListMediaInfo(id).catch(() => null)));
-    const nextFrontier = [];
-    infos.forEach(info => {
-      if (!info) return;
-      infoById.set(info.id, info);
-      (info.relations && info.relations.edges || []).forEach(edge => {
-        if ((edge.relationType === 'SEQUEL' || edge.relationType === 'PREQUEL')
-          && edge.node && edge.node.type === 'ANIME' && edge.node.format !== 'MOVIE'
-          && !visited.has(edge.node.id) && visited.size < maxIds) {
-          visited.add(edge.node.id);
-          nextFrontier.push(edge.node.id);
-        }
-      });
-    });
-    frontier = nextFrontier;
-    if (frontier.length > 0) await new Promise(r => setTimeout(r, 300));
-  }
-  // The starting entry's own info might not be fetched yet if it had no relations checked this loop.
-  if (!infoById.has(Number(anilistId))) {
-    const info = await fetchAniListMediaInfo(anilistId).catch(() => null);
-    if (info) infoById.set(info.id, info);
-  }
-  return Array.from(infoById.values());
-}
-
 async function fetchAnimeSeasonsAniList(anilistId, totalEpisodesHint) {
   try {
-    const relatedEntries = await resolveAniListFranchiseIds(anilistId);
-    const base = relatedEntries.length > 0 ? relatedEntries : null;
-    if (!base) {
-      const info = await fetchAniListMediaInfo(anilistId).catch(() => null);
-      const total = (info && info.episodes) || totalEpisodesHint || 0;
-      if (!total) return [];
-      return [{ seasonNumber: 1, episodes: Array.from({ length: total }, (_, i) => ({ id: `anilistep${anilistId}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null })) }];
-    }
-    const seasons = base
-      .sort((a, b) => ((a.startDate && a.startDate.year) || 0) - ((b.startDate && b.startDate.year) || 0))
-      .map(entry => {
-        const total = entry.episodes || 0;
-        const label = (entry.startDate && entry.startDate.year) || (entry.title && (entry.title.english || entry.title.romaji)) || entry.id;
-        return {
-          seasonNumber: label,
-          episodes: Array.from({ length: total }, (_, i) => ({ id: `anilistep${entry.id}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null })),
-        };
-      })
-      .filter(s => s.episodes.length > 0);
-    return seasons;
+    const info = await fetchAniListMediaInfo(anilistId).catch(() => null);
+    const total = (info && info.episodes) || totalEpisodesHint || 0;
+    if (!total) return [];
+    return [{ seasonNumber: 1, episodes: Array.from({ length: total }, (_, i) => ({ id: `anilistep${anilistId}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null })) }];
   } catch (e) { return []; }
 }
 
@@ -2263,41 +2180,11 @@ export default function App() {
   };
   const openExisting = (item) => setModal({ ...item });
 
-  // Before adding an anime, check whether it's really just another part of a Bleach/
-  // Re:Zero-style franchise you already have — otherwise "Season 2022" and "Season
-  // 2004" of the same show could end up as two separate library items, silently
-  // doubling your watch-time stats.
-  const findExistingFranchiseItem = async (result) => {
-    if (result.type !== 'anime' || !result.externalId) return null;
-    const existingAnime = items.filter(i => i.type === 'anime' && i.externalId);
-    if (existingAnime.length === 0) return null;
-    const dbId = result.externalId.split('-').slice(1).join('-');
-    try {
-      let relatedExternalIds = [];
-      if (result.externalId.startsWith('jikan-')) {
-        const ids = await resolveAnimeFranchiseIds(dbId);
-        relatedExternalIds = ids.map(id => `jikan-${id}`);
-      } else if (result.externalId.startsWith('anilist-')) {
-        const entries = await resolveAniListFranchiseIds(dbId);
-        relatedExternalIds = entries.map(e => `anilist-${e.id}`);
-      }
-      const relatedSet = new Set(relatedExternalIds);
-      return existingAnime.find(i => relatedSet.has(i.externalId)) || null;
-    } catch (e) { return null; }
-  };
-
   // One-tap add straight from a search result — mirrors the "Add Show / Add Movie" pattern,
   // no form to fill in. status defaults to 'planned' (from the row's quick-add +) but the
   // detail sheet can pass 'completed' for "I've watched it" straight away.
   const quickAddFromResult = async (result, status = 'planned') => {
     const type = TYPE_META[result.type] ? result.type : 'movie';
-
-    const existingFranchiseItem = await findExistingFranchiseItem(result);
-    if (existingFranchiseItem) {
-      openExisting(existingFranchiseItem);
-      return existingFranchiseItem;
-    }
-
     const now = new Date().toISOString();
     const isEpisodic = type !== 'movie';
     let watchedEpisodeIds = [];
