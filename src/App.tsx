@@ -1647,10 +1647,17 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
     });
   };
 
+  // For anything already in the library, every change saves immediately — no separate
+  // "Save" tap needed anywhere in this screen. Only a brand-new, not-yet-added item
+  // still needs an explicit Save (that's the "add it" action).
+  const setAndPersist = (k, v) => {
+    const updated = { ...form, [k]: v };
+    setForm(updated);
+    if (!isNew) persistNow(updated);
+  };
+
   // Picking "Watched" for a series/anime checks off every episode too, instead of
-  // leaving the status and checklist out of sync with each other. For anything already
-  // in the library, the status change also saves immediately — no separate "Save" tap
-  // needed, same as checking off an episode already works.
+  // leaving the status and checklist out of sync with each other.
   const handleStatusChange = (k) => {
     let updated = { ...form, status: k };
     if (k === 'completed' && isEpisodic) {
@@ -1673,7 +1680,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
 
   const statusColor = STATUS_META[form.status].color;
   const hoursValue = ((Number(form.movieMinutes) || TYPE_META.movie.defaultMinutes) / 60).toFixed(1);
-  const setHours = (v) => set('movieMinutes', Math.max(0, Math.round(parseFloat(v || 0) * 60)));
+  const setHours = (v) => setAndPersist('movieMinutes', Math.max(0, Math.round(parseFloat(v || 0) * 60)));
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -1731,12 +1738,12 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
               <div>
                 <div className="im-inline-label">Watched</div>
                 <input type="number" min="0" value={form.episodesWatched ?? 0}
-                  onChange={e => set('episodesWatched', e.target.value)} />
+                  onChange={e => setAndPersist('episodesWatched', e.target.value)} />
               </div>
               <div>
                 <div className="im-inline-label">Total (optional)</div>
                 <input type="number" min="0" value={form.totalEpisodes ?? ''}
-                  onChange={e => set('totalEpisodes', e.target.value)} />
+                  onChange={e => setAndPersist('totalEpisodes', e.target.value)} />
               </div>
             </div>
           )}
@@ -1778,7 +1785,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
             {Array.from({ length: 10 }).map((_, i) => {
               const val = i + 1;
               return (
-                <button key={val} className="rate-dot" onClick={() => set('rating', form.rating === val ? null : val)}>
+                <button key={val} className="rate-dot" onClick={() => setAndPersist('rating', form.rating === val ? null : val)}>
                   <Star size={17} fill={form.rating >= val ? '#F5A623' : 'none'} stroke={form.rating >= val ? '#F5A623' : '#4A5178'} />
                 </button>
               );
@@ -1798,18 +1805,20 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
           <div className="im-card-accent" style={{ background: meta.color }} />
           <div className="im-card-label">Notes</div>
           <textarea rows={2} placeholder="Your own thoughts, optional..." value={legacySummaryInNotes ? '' : (form.notes || '')}
-            onChange={e => set('notes', e.target.value)} />
+            onChange={e => set('notes', e.target.value)}
+            onBlur={() => { if (!isNew) persistNow(form); }} />
         </div>
 
         <div className="modal-actions">
-          {!isNew && (
-            <button className="danger-btn" onClick={() => onDelete(form.id)}>
-              <Trash2 size={16} />
+          {isNew ? (
+            <button className="save-btn" style={{ '--c': meta.color }} onClick={save} disabled={!form.title.trim()}>
+              Save
+            </button>
+          ) : (
+            <button className="danger-btn danger-btn-wide" onClick={() => onDelete(form.id)}>
+              <Trash2 size={16} /> Delete
             </button>
           )}
-          <button className="save-btn" style={{ '--c': meta.color }} onClick={save} disabled={!form.title.trim()}>
-            Save
-          </button>
         </div>
 
         {isFromDb && similar && similar.length > 0 && (
@@ -2650,6 +2659,7 @@ function GlobalStyle() {
       .choice-btn.watched { background: rgba(126,217,87,0.16); border-color: #7ED957; color: #7ED957; }
       .already-note { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 10px; padding: 12px; border-radius: 12px; background: rgba(126,217,87,0.12); color: #7ED957; font-weight: 700; font-size: 13px; }
       .danger-btn { display: flex; align-items: center; justify-content: center; width: 52px; flex-shrink: 0; border-radius: 14px; background: linear-gradient(155deg, rgba(255,107,107,0.22), rgba(255,107,107,0.08)); border: 1px solid rgba(255,107,107,0.5); color: #FF6B6B; font-weight: 600; font-size: 13px; }
+      .danger-btn-wide { width: 100%; gap: 7px; padding: 13px; font-size: 14.5px; font-weight: 700; }
       .save-btn { flex: 1; padding: 12px; border-radius: 14px; background: linear-gradient(135deg, var(--c), color-mix(in srgb, var(--c) 60%, white)); color: #0B0E1A; font-weight: 800; font-size: 14.5px; box-shadow: 0 8px 20px -6px color-mix(in srgb, var(--c) 60%, transparent); }
       .save-btn:disabled { opacity: 0.5; }
 
