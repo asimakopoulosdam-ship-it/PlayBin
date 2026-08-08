@@ -825,13 +825,15 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd }) {
 
 /* ---------------------------------- Result detail sheet ---------------------------------- */
 
-function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
+function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQuickAdd }) {
   useBodyScrollLock();
   const [detail, setDetail] = useState(result);
   const [loadingMore, setLoadingMore] = useState(!!result.needsDetail);
   const [imgError, setImgError] = useState(false);
   const [seasons, setSeasons] = useState(null);
   const [loadingSeasons, setLoadingSeasons] = useState(false);
+  const [similar, setSimilar] = useState(null);
+  const [addedSimilar, setAddedSimilar] = useState(() => new Set());
   const meta = TYPE_META[result.type];
   const existingItem = items.find(i => i.externalId === result.externalId && i.type === result.type);
   const already = !!existingItem;
@@ -851,6 +853,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
       fetchSeasonsFor(result).then(r => { if (!cancelled) setSeasons(r); })
         .catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
     }
+    fetchSimilarTitles(result).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
     return () => { cancelled = true; };
   }, [result]);
 
@@ -874,7 +877,11 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
               {detail.type !== 'movie' && (
                 <span>{detail.episodes != null ? `${detail.episodes} episodes` : 'episode count unknown'}</span>
               )}
-              {detail.runtimeMinutes ? <span>{detail.runtimeMinutes}′ {detail.type !== 'movie' ? '/ep' : ''}</span> : (loadingMore ? <span>loading…</span> : null)}
+              {detail.runtimeMinutes ? (
+                detail.type === 'movie'
+                  ? <span>{(detail.runtimeMinutes / 60).toFixed(1)}h</span>
+                  : <span>{detail.runtimeMinutes}′ /ep</span>
+              ) : (loadingMore ? <span>loading…</span> : null)}
             </div>
             {detail.extraNote && <div className="detail-note">{detail.extraNote}</div>}
           </div>
@@ -916,6 +923,32 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
               </div>
             )}
           </>
+        )}
+
+        {similar && similar.length > 0 && (
+          <div className="im-similar-section">
+            <div className="im-card-label" style={{ marginTop: 16 }}>You might also like</div>
+            <div className="similar-scroll">
+              {similar.map(s => {
+                const alreadyAdded = addedSimilar.has(s.externalId);
+                return (
+                  <div key={s.externalId} className="similar-card">
+                    <div className="similar-poster">
+                      {s.posterUrl ? <img src={s.posterUrl} alt="" /> : <Film size={18} />}
+                    </div>
+                    <div className="similar-title">{s.title}</div>
+                    <button
+                      className="similar-add"
+                      disabled={alreadyAdded}
+                      onClick={() => { onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
+                    >
+                      {alreadyAdded ? <Check size={13} /> : <Plus size={13} />}
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
       </div>
     </div>
@@ -1125,6 +1158,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           onClose={() => setActiveResult(null)}
           onAdd={handleAddFromResult}
           onOpenEpisodes={(result, season) => { onOpenEpisodes(result, season); setActiveResult(null); }}
+          onQuickAdd={onQuickAdd}
         />
       )}
     </div>
@@ -1231,6 +1265,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
           onClose={() => setActiveResult(null)}
           onAdd={handleAdd}
           onOpenEpisodes={(result, season) => { onOpenEpisodes(result, season); onClose(); }}
+          onQuickAdd={onQuickAdd}
         />
       )}
     </div>
