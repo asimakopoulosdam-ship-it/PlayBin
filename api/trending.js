@@ -1,7 +1,11 @@
 // Save this file as: api/trending.js  (inside the "api" folder at your project root)
-// Same simplified approach as search.js — no caching yet, just a secure proxy.
+// Same idea as api/search.js, but for the "Trending now" list on Discover.
+// Cached for 6 hours since trending lists shift day to day, not minute to minute.
+
+import { kv } from '@vercel/kv';
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
+const CACHE_SECONDS = 60 * 60 * 6; // 6 hours
 
 function formatDateISOish(dateStr) {
   if (!dateStr) return null;
@@ -66,7 +70,7 @@ async function trendingAnimeLive() {
   if (!res.ok) throw new Error('jikan trending failed');
   const data = await res.json();
   return (data.data || []).map(a => ({
-    source: 'jikan', type: 'anime', externalId: `jikan-${a.mal_id}`,
+    source: 'jikan', type: 'anime', subtype: a.type || null, externalId: `jikan-${a.mal_id}`,
     title: a.title_english || a.title,
     altTitles: [a.title, a.title_english, a.title_japanese].filter(Boolean),
     year: (a.aired && a.aired.from) ? a.aired.from.slice(0, 4) : (a.year || null),
@@ -80,6 +84,13 @@ async function trendingAnimeLive() {
 }
 
 export default async function handler(req, res) {
+  const cacheKey = 'trending:all';
+
+  try {
+    const cached = await kv.get(cacheKey);
+    if (cached) return res.status(200).json({ results: cached, cached: true });
+  } catch (e) { /* fall through */ }
+
   const [m, s, a] = await Promise.allSettled([
     trendingMoviesLive(process.env.TMDB_API_KEY),
     trendingSeriesLive(process.env.TMDB_API_KEY),
@@ -100,6 +111,10 @@ export default async function handler(req, res) {
   if (combined.length === 0) {
     return res.status(502).json({ error: 'Upstream sources unavailable right now' });
   }
+
+  try {
+    await kv.set(cacheKey, combined, { ex: CACHE_SECONDS });
+  } catch (e) { /* not fatal */ }
 
   return res.status(200).json({ results: combined, cached: false });
 }
