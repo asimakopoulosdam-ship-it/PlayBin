@@ -1636,34 +1636,39 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  const persistNow = (updated) => {
+    const now = new Date().toISOString();
+    onSave({
+      ...updated,
+      title: updated.title.trim(),
+      dateAdded: updated.dateAdded || now,
+      dateWatched: (updated.status === 'watching' || updated.status === 'completed') ? (updated.dateWatched || now) : updated.dateWatched,
+      id: updated.id || uid(),
+    });
+  };
+
   // Picking "Watched" for a series/anime checks off every episode too, instead of
-  // leaving the status and checklist out of sync with each other.
+  // leaving the status and checklist out of sync with each other. For anything already
+  // in the library, the status change also saves immediately — no separate "Save" tap
+  // needed, same as checking off an episode already works.
   const handleStatusChange = (k) => {
+    let updated = { ...form, status: k };
     if (k === 'completed' && isEpisodic) {
       if (isFromDb && seasons && seasons.length > 0) {
         const allIds = seasons.flatMap(s => s.episodes.map(e => e.id));
-        setForm(f => ({ ...f, status: k, watchedEpisodeIds: allIds, totalEpisodes: allIds.length || f.totalEpisodes }));
-        return;
-      }
-      if (!isFromDb) {
-        setForm(f => ({ ...f, status: k, episodesWatched: f.totalEpisodes || f.episodesWatched }));
-        return;
+        updated = { ...updated, watchedEpisodeIds: allIds, totalEpisodes: allIds.length || form.totalEpisodes };
+      } else if (!isFromDb) {
+        updated = { ...updated, episodesWatched: form.totalEpisodes || form.episodesWatched };
       }
     }
-    set('status', k);
+    setForm(updated);
+    if (!isNew) persistNow(updated);
   };
 
 
   const save = () => {
     if (!form.title.trim()) return;
-    const now = new Date().toISOString();
-    onSave({
-      ...form,
-      title: form.title.trim(),
-      dateAdded: form.dateAdded || now,
-      dateWatched: (form.status === 'watching' || form.status === 'completed') ? (form.dateWatched || now) : form.dateWatched,
-      id: form.id || uid(),
-    });
+    persistNow(form);
   };
 
   const statusColor = STATUS_META[form.status].color;
