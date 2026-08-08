@@ -66,6 +66,28 @@ if (SUPABASE_CONFIGURED) {
 
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
 
+// Any modal/bottom-sheet calls this on mount. Without it, a touch that starts on the
+// sheet can end up scrolling the page behind it too (iOS Safari's default behavior),
+// which is exactly the "can't scroll, or the wrong thing scrolls" feeling.
+function useBodyScrollLock() {
+  useEffect(() => {
+    const scrollY = window.scrollY;
+    const body = document.body;
+    const prev = { position: body.style.position, top: body.style.top, width: body.style.width, overflow: body.style.overflow };
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.width = '100%';
+    body.style.overflow = 'hidden';
+    return () => {
+      body.style.position = prev.position;
+      body.style.top = prev.top;
+      body.style.width = prev.width;
+      body.style.overflow = prev.overflow;
+      window.scrollTo(0, scrollY);
+    };
+  }, []);
+}
+
 function computeMinutes(item) {
   if (item.type === 'movie') {
     return item.status === 'completed' ? (Number(item.movieMinutes) || TYPE_META.movie.defaultMinutes) : 0;
@@ -759,6 +781,7 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd }) {
 /* ---------------------------------- Result detail sheet ---------------------------------- */
 
 function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes }) {
+  useBodyScrollLock();
   const [detail, setDetail] = useState(result);
   const [loadingMore, setLoadingMore] = useState(!!result.needsDetail);
   const [imgError, setImgError] = useState(false);
@@ -1081,6 +1104,7 @@ function sortItems(list, sortBy) {
 // Search scoped to one type, used from My Shows' "+" — only real, verified titles from
 // the database can be added here; nothing freeform or unconfirmed.
 function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
+  useBodyScrollLock();
   const meta = TYPE_META[type];
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
@@ -1491,6 +1515,7 @@ function TimeChip({ n, u }) {
 /* ---------------------------------- Add / Edit modal ---------------------------------- */
 
 function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes }) {
+  useBodyScrollLock();
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
   const isEpisodic = form.type !== 'movie';
@@ -1720,6 +1745,7 @@ function SeasonRow({ season, watchedSet, onOpen }) {
 }
 
 function EpisodesSheet({ item, initialSeason, onClose, onToggle, onToggleMany, onEditInfo }) {
+  useBodyScrollLock();
   const [seasons, setSeasons] = useState(null);
   const [loading, setLoading] = useState(!initialSeason);
   const [error, setError] = useState('');
@@ -1844,6 +1870,13 @@ export default function App() {
   const [profile, setProfile] = useState({ name: '' });
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState('discover');
+  // Tapping the nav icon for the screen you're already on resets it (closes any
+  // sub-view like "Upcoming", clears an in-progress search) instead of doing nothing.
+  const [resetTick, setResetTick] = useState({ discover: 0, myshows: 0, account: 0 });
+  const handleNav = (v) => {
+    if (v === view) setResetTick(t => ({ ...t, [v]: t[v] + 1 }));
+    else setView(v);
+  };
   const [modal, setModal] = useState(null);
   const [episodesItem, setEpisodesItem] = useState(null);
   const [presetSeason, setPresetSeason] = useState(null);
@@ -2112,6 +2145,7 @@ export default function App() {
       <div className="view-area">
         {view === 'discover' && (
           <DiscoverScreen
+            key={resetTick.discover}
             items={items}
             onOpen={openExisting}
             onQuickAdd={quickAddFromResult}
@@ -2121,6 +2155,7 @@ export default function App() {
         )}
         {view === 'myshows' && (
           <MyShowsScreen
+            key={resetTick.myshows}
             items={items}
             onOpen={openExisting}
             onQuickAdd={quickAddFromResult}
@@ -2132,6 +2167,7 @@ export default function App() {
         )}
         {view === 'account' && (
           <AccountScreen
+            key={resetTick.account}
             items={items}
             onOpen={openExisting}
             profileName={profile.name}
@@ -2144,7 +2180,7 @@ export default function App() {
         )}
       </div>
 
-      <BottomNav view={view} onNav={setView} />
+      <BottomNav view={view} onNav={handleNav} />
 
       {modal && (
         <ItemModal draft={modal} onClose={() => setModal(null)} onSave={upsertItem} onDelete={deleteItem}
@@ -2290,7 +2326,7 @@ function GlobalStyle() {
       .detail-year { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
       .detail-facts { display: flex; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--text); margin-bottom: 6px; }
       .detail-note { font-size: 11.5px; color: #7ED957; font-weight: 600; }
-      .detail-summary { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 6px; max-height: 140px; overflow-y: auto; }
+      .detail-summary { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 6px; }
       .trailer-btn { display: flex; align-items: center; gap: 6px; padding: 12px 16px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
 
       /* ---------- My Shows ---------- */
