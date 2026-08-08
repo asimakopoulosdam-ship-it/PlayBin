@@ -121,3 +121,4 @@ export default async function handler(req, res) {
   } catch (e) { /* not fatal */ }
 
   return res.status(200).json({ results: combined, cached: false, page });
+}
