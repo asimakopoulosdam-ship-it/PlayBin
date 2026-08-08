@@ -814,7 +814,7 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd }) {
 
 /* ---------------------------------- Result detail sheet ---------------------------------- */
 
-function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQuickAdd }) {
+function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQuickAdd, onOpenResult }) {
   useBodyScrollLock();
   const [detail, setDetail] = useState(result);
   const [loadingMore, setLoadingMore] = useState(!!result.needsDetail);
@@ -921,7 +921,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
               {similar.map(s => {
                 const alreadyAdded = addedSimilar.has(s.externalId);
                 return (
-                  <div key={s.externalId} className="similar-card">
+                  <div key={s.externalId} className="similar-card" onClick={() => onOpenResult(s)}>
                     <div className="similar-poster">
                       {s.posterUrl ? <img src={s.posterUrl} alt="" /> : <Film size={18} />}
                     </div>
@@ -929,7 +929,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
                     <button
                       className="similar-add"
                       disabled={alreadyAdded}
-                      onClick={() => { onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
+                      onClick={(e) => { e.stopPropagation(); onQuickAdd(s, 'planned'); setAddedSimilar(prev => new Set(prev).add(s.externalId)); }}
                     >
                       {alreadyAdded ? <Check size={13} /> : <Plus size={13} />}
                     </button>
@@ -952,7 +952,13 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
   const [searching, setSearching] = useState(false);
   const [searchError, setSearchError] = useState('');
   const [results, setResults] = useState(null);
-  const [activeResult, setActiveResult] = useState(null);
+  // A real back-stack instead of a single value — so drilling into a "You might also
+  // like" suggestion and pressing back returns to the result you came from, not all
+  // the way out to the search list.
+  const [resultStack, setResultStack] = useState([]);
+  const activeResult = resultStack.length > 0 ? resultStack[resultStack.length - 1] : null;
+  const openResult = (result) => setResultStack(stack => [...stack, result]);
+  const closeResult = () => setResultStack(stack => stack.slice(0, -1));
   const [history, setHistory] = useState([]);
   const [trending, setTrending] = useState(null);
   const [trendingLoading, setTrendingLoading] = useState(true);
@@ -1009,7 +1015,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
 
   const handleAddFromResult = (detail, status) => {
     onQuickAdd(detail, status);
-    setActiveResult(null);
+    setResultStack([]);
   };
 
   const hasAnyResults = results && (results.series.length || results.anime.length || results.movie.length);
@@ -1077,7 +1083,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
                   key={r.externalId}
                   result={r}
                   inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                  onOpen={setActiveResult}
+                  onOpen={openResult}
                   onQuickAdd={onQuickAdd}
                 />
               ))}
@@ -1114,7 +1120,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
                   key={r.externalId}
                   result={r}
                   inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                  onOpen={setActiveResult}
+                  onOpen={openResult}
                   onQuickAdd={onQuickAdd}
                 />
               ))}
@@ -1133,7 +1139,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length > 0 && (
             <div className="item-list">
               {upcomingGlobal.map(r => (
-                <UpcomingResultRow key={r.externalId} result={r} onOpen={setActiveResult} />
+                <UpcomingResultRow key={r.externalId} result={r} onOpen={openResult} />
               ))}
             </div>
           )}
@@ -1142,12 +1148,14 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
 
       {activeResult && (
         <ResultDetailSheet
+          key={activeResult.externalId}
           result={activeResult}
           items={items}
-          onClose={() => setActiveResult(null)}
+          onClose={closeResult}
           onAdd={handleAddFromResult}
-          onOpenEpisodes={(result, season) => { onOpenEpisodes(result, season); setActiveResult(null); }}
+          onOpenEpisodes={onOpenEpisodes}
           onQuickAdd={onQuickAdd}
+          onOpenResult={openResult}
         />
       )}
     </div>
@@ -1178,7 +1186,10 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState(null);
   const [error, setError] = useState('');
-  const [activeResult, setActiveResult] = useState(null);
+  const [resultStack, setResultStack] = useState([]);
+  const activeResult = resultStack.length > 0 ? resultStack[resultStack.length - 1] : null;
+  const openResult = (result) => setResultStack(stack => [...stack, result]);
+  const closeResult = () => setResultStack(stack => stack.slice(0, -1));
   const debounceRef = useRef(null);
 
   useEffect(() => {
@@ -1201,7 +1212,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
 
   const handleAdd = (detail, status) => {
     onQuickAdd(detail, status);
-    setActiveResult(null);
+    setResultStack([]);
     onClose();
   };
 
@@ -1239,7 +1250,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
                 key={r.externalId}
                 result={r}
                 inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                onOpen={setActiveResult}
+                onOpen={openResult}
                 onQuickAdd={(res, status) => handleAdd(res, status)}
               />
             ))}
@@ -1249,12 +1260,14 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
 
       {activeResult && (
         <ResultDetailSheet
+          key={activeResult.externalId}
           result={activeResult}
           items={items}
-          onClose={() => setActiveResult(null)}
+          onClose={closeResult}
           onAdd={handleAdd}
-          onOpenEpisodes={(result, season) => { onOpenEpisodes(result, season); onClose(); }}
+          onOpenEpisodes={onOpenEpisodes}
           onQuickAdd={onQuickAdd}
+          onOpenResult={openResult}
         />
       )}
     </div>
@@ -2629,7 +2642,7 @@ function GlobalStyle() {
       .im-description { font-size: 13.5px; line-height: 1.6; color: var(--muted); margin: 0; }
       .im-similar-section { margin-top: 18px; }
       .similar-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
-      .similar-card { flex-shrink: 0; width: 92px; position: relative; }
+      .similar-card { flex-shrink: 0; width: 92px; position: relative; cursor: pointer; }
       .similar-poster { width: 92px; height: 130px; border-radius: 10px; overflow: hidden; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .similar-poster img { width: 100%; height: 100%; object-fit: cover; }
       .similar-title { font-size: 11.5px; font-weight: 600; margin-top: 6px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
