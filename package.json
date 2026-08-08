@@ -1,5 +1,5 @@
 {
-  "name": "showhub",
+  "name": "playbin",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -13,7 +13,8 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "lucide-react": "^0.383.0",
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.45.0",
+    "@vercel/kv": "^2.0.0"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
@@ -24,4 +25,3 @@
     "vite": "^8.2.0"
   }
 }
-
