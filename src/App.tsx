@@ -509,10 +509,34 @@ async function fetchAnimeSeasons(malId) {
   return seasons;
 }
 
+// AniList only shows up for anime Jikan couldn't answer (see the search fallback) —
+// it doesn't expose a rich per-episode title list the way Jikan does, so this builds
+// a simple numbered checklist from the total episode count instead. Less detail, but
+// still fully usable for tracking what's been watched.
+async function fetchAnimeSeasonsAniList(anilistId, totalEpisodesHint) {
+  try {
+    const query = `query ($id: Int) { Media(id: $id, type: ANIME) { episodes } }`;
+    const res = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
+    });
+    const data = await res.json();
+    const total = (data.data && data.data.Media && data.data.Media.episodes) || totalEpisodesHint || 0;
+    if (!total) return [];
+    const episodes = Array.from({ length: total }, (_, i) => ({
+      id: `anilistep${anilistId}-${i + 1}`, number: i + 1, name: `Episode ${i + 1}`, airdate: null,
+    }));
+    return [{ seasonNumber: 1, episodes }];
+  } catch (e) { return []; }
+}
+
 // Same shape either way, so callers don't need to branch on type themselves.
 async function fetchSeasonsFor(item) {
   const dbId = (item.externalId || '').split('-').slice(1).join('-');
-  return item.type === 'series' ? fetchSeriesSeasons(dbId) : fetchAnimeSeasons(dbId);
+  if (item.type === 'series') return fetchSeriesSeasons(dbId);
+  if (item.externalId && item.externalId.startsWith('anilist-')) return fetchAnimeSeasonsAniList(dbId, item.totalEpisodes || item.episodes);
+  return fetchAnimeSeasons(dbId);
 }
 
 function normalizeTitle(t) {
