@@ -2415,7 +2415,7 @@ function GlobalStyle() {
       .result-row-add:disabled { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 16%, var(--surface2)); opacity: 1; }
 
       /* ---------- Detail sheet ---------- */
-      .detail-modal { max-height: 90vh; }
+      .detail-modal { }
       .detail-hero { display: flex; gap: 14px; margin-bottom: 14px; }
       .detail-poster { width: 96px; height: 132px; border-radius: 12px; overflow: hidden; background: var(--surface2); border: 1px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
       .detail-poster img { width: 100%; height: 100%; object-fit: cover; }
@@ -2523,8 +2523,8 @@ function GlobalStyle() {
       .type-stat-l { font-size: 10.5px; color: var(--muted); }
 
       /* ---------- Modal ---------- */
-      .modal-backdrop { position: fixed; inset: 0; background: rgba(6,8,16,0.72); backdrop-filter: blur(3px); display: flex; align-items: flex-end; justify-content: center; z-index: 50; }
-      .modal { width: 100%; max-width: 480px; max-height: 88vh; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; touch-action: pan-y; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
+      .modal-backdrop { position: fixed; inset: 0; background: rgba(6,8,16,0.72); backdrop-filter: blur(3px); z-index: 50; display: flex; flex-direction: column; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+      .modal { width: 100%; max-width: 480px; margin: auto auto 0; flex-shrink: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 22px 22px 0 0; padding: 18px 18px 26px; }
       .modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
       .icon-x { width: 30px; height: 30px; border-radius: 8px; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
       .modal-title-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 12px; padding: 12px; font-size: 16px; font-weight: 600; outline: none; margin-bottom: 12px; }
