@@ -596,6 +596,24 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'dr-stone', pattern: /^dr\.?\s*stone\b/i },
   { key: 'quintessential-quintuplets', pattern: /^(the quintessential quintuplets|go-?toubun no hanayome)\b/i },
   { key: 'takagi-san', pattern: /^(karakai jouzu no takagi-san|teasing master takagi-san)\b/i },
+  { key: 'hellsing', pattern: /^hellsing\b/i },
+  { key: 'nisekoi', pattern: /^nisekoi\b/i },
+  { key: 'golden-kamuy', pattern: /^golden kamuy\b/i },
+  { key: 'misfit-demon-king', pattern: /^(the misfit of demon king academy|maou gakuin no futekigousha)\b/i },
+  { key: 'shangri-la-frontier', pattern: /^shangri-la frontier\b/i },
+  { key: 'solo-leveling', pattern: /^solo leveling\b/i },
+  { key: 'mashle', pattern: /^mashle\b/i },
+  { key: 'wind-breaker', pattern: /^wind breaker\b/i },
+  { key: 'frieren', pattern: /^(frieren|sousou no frieren)\b/i },
+  { key: 'eminence-shadow', pattern: /^(the eminence in shadow|kage no jitsuryokusha)\b/i },
+  { key: 'horimiya', pattern: /^horimiya\b/i },
+  { key: 'to-your-eternity', pattern: /^(to your eternity|fumetsu no anata e)\b/i },
+  { key: 'dandadan', pattern: /^dandadan\b/i },
+  { key: 'kingdom', pattern: /^kingdom\b/i },
+  // Merges the 2001 original with the 2019 reboot too, same call as Fullmetal
+  // Alchemist above — different adaptations of the same manga, grouped together
+  // on purpose per request.
+  { key: 'fruits-basket', pattern: /^fruits basket\b/i },
 ];
 
 function franchiseGroupKeyForTitle(title) {
