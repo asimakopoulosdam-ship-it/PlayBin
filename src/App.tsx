@@ -1203,11 +1203,17 @@ function UpcomingResultRow({ result, onOpen }) {
   );
 }
 
-function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
+function ResultRow({ result, inLibrary, libraryItemId, onOpen, onQuickAdd, onRemoveFromLibrary }) {
   const meta = TYPE_META[result.type];
   const Icon = meta.icon;
   const [imgError, setImgError] = useState(false);
   const showImg = result.posterUrl && !imgError;
+  // Tapping "In list" again removes it — the common case is an accidental tap while
+  // browsing search results, and undoing that shouldn't require a trip to My Shows.
+  const handleAddClick = () => {
+    if (inLibrary && libraryItemId && onRemoveFromLibrary) onRemoveFromLibrary(libraryItemId);
+    else onQuickAdd(result);
+  };
   return (
     <div className="result-row" style={{ '--c': meta.color }}>
       <button className="result-row-main" onClick={() => onOpen(result)}>
@@ -1235,7 +1241,7 @@ function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
           </div>
         </div>
       </button>
-      <button className="result-row-add" disabled={inLibrary} onClick={() => onQuickAdd(result)}>
+      <button className={`result-row-add ${inLibrary ? 'in-list' : ''}`} onClick={handleAddClick}>
         {inLibrary ? <Check size={16} /> : <Plus size={16} />}
         <span>{inLibrary ? 'In list' : (result.type === 'movie' ? 'Movie' : result.type === 'series' ? 'Series' : 'Anime')}</span>
       </button>
@@ -1243,21 +1249,26 @@ function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
   );
 }
 
-function ResultSection({ title, color, results, items, onOpen, onQuickAdd }) {
+function ResultSection({ title, color, results, items, onOpen, onQuickAdd, onRemoveFromLibrary }) {
   if (!results || results.length === 0) return null;
   return (
     <div className="result-section">
       <div className="group-title" style={{ color }}>{title}</div>
       <div className="result-list">
-        {results.map(r => (
-          <ResultRow
-            key={r.externalId}
-            result={r}
-            inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-            onOpen={onOpen}
-            onQuickAdd={onQuickAdd}
-          />
-        ))}
+        {results.map(r => {
+          const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
+          return (
+            <ResultRow
+              key={r.externalId}
+              result={r}
+              inLibrary={!!matched}
+              libraryItemId={matched ? matched.id : null}
+              onOpen={onOpen}
+              onQuickAdd={onQuickAdd}
+              onRemoveFromLibrary={onRemoveFromLibrary}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -1397,7 +1408,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
 
 /* ---------------------------------- Discover (home) ---------------------------------- */
 
-function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName }) {
+function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, profileName }) {
   const [discoverTab, setDiscoverTab] = useState('search'); // 'search' | 'upcoming'
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'movie' | 'series' | 'anime' — applies while in Search
   const [query, setQuery] = useState('');
@@ -1568,15 +1579,20 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
           ) : trending && trending.filter(r => typeFilter === 'all' || r.type === typeFilter).length > 0 ? (
             <>
               <div className="result-list">
-                {trending.filter(r => typeFilter === 'all' || r.type === typeFilter).map(r => (
-                  <ResultRow
-                    key={r.externalId}
-                    result={r}
-                    inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                    onOpen={openResult}
-                    onQuickAdd={onQuickAdd}
-                  />
-                ))}
+                {trending.filter(r => typeFilter === 'all' || r.type === typeFilter).map(r => {
+                  const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
+                  return (
+                    <ResultRow
+                      key={r.externalId}
+                      result={r}
+                      inLibrary={!!matched}
+                      libraryItemId={matched ? matched.id : null}
+                      onOpen={openResult}
+                      onQuickAdd={onQuickAdd}
+                      onRemoveFromLibrary={onDelete}
+                    />
+                  );
+                })}
               </div>
               {!trendingExhausted && (
                 <button className="show-more-btn" onClick={loadMoreTrending} disabled={loadingMoreTrending}>
@@ -1616,15 +1632,20 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, profileName
               ...(typeFilter === 'all' || typeFilter === 'anime' ? results.anime : []),
             ]
               .sort((a, b) => searchScore(b, query) - searchScore(a, query))
-              .map(r => (
-                <ResultRow
-                  key={r.externalId}
-                  result={r}
-                  inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                  onOpen={openResult}
-                  onQuickAdd={onQuickAdd}
-                />
-              ))}
+              .map(r => {
+                const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
+                return (
+                  <ResultRow
+                    key={r.externalId}
+                    result={r}
+                    inLibrary={!!matched}
+                    libraryItemId={matched ? matched.id : null}
+                    onOpen={openResult}
+                    onQuickAdd={onQuickAdd}
+                    onRemoveFromLibrary={onDelete}
+                  />
+                );
+              })}
           </div>
         </div>
       )}
@@ -1680,7 +1701,7 @@ function sortItems(list, sortBy) {
 
 // Search scoped to one type, used from My Shows' "+" — only real, verified titles from
 // the database can be added here; nothing freeform or unconfirmed.
-function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
+function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onDelete }) {
   useBodyScrollLock();
   const meta = TYPE_META[type];
   const [query, setQuery] = useState('');
@@ -1746,15 +1767,20 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes }) {
 
         {results && results.length > 0 && (
           <div className="result-list" style={{ marginTop: 14 }}>
-            {results.map(r => (
-              <ResultRow
-                key={r.externalId}
-                result={r}
-                inLibrary={items.some(i => i.externalId === r.externalId && i.type === r.type)}
-                onOpen={openResult}
-                onQuickAdd={(res, status) => handleAdd(res, status)}
-              />
-            ))}
+            {results.map(r => {
+              const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
+              return (
+                <ResultRow
+                  key={r.externalId}
+                  result={r}
+                  inLibrary={!!matched}
+                  libraryItemId={matched ? matched.id : null}
+                  onOpen={openResult}
+                  onQuickAdd={(res, status) => handleAdd(res, status)}
+                  onRemoveFromLibrary={onDelete}
+                />
+              );
+            })}
           </div>
         )}
       </div>
@@ -1916,6 +1942,7 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
           onClose={() => setSearchOpen(false)}
           onQuickAdd={onQuickAdd}
           onOpenEpisodes={onOpenEpisodes}
+          onDelete={onDelete}
         />
       )}
     </div>
@@ -2829,6 +2856,7 @@ export default function App() {
             onOpen={openExisting}
             onQuickAdd={quickAddFromResult}
             onOpenEpisodes={openEpisodesFromResult}
+            onDelete={deleteItem}
             profileName={profile.name}
           />
         )}
@@ -2994,6 +3022,7 @@ function GlobalStyle() {
         padding: 8px 10px; border-radius: 11px; background: color-mix(in srgb, var(--c) 16%, var(--surface2));
         border: 1px solid var(--c); color: var(--c); font-size: 9.5px; font-weight: 700; min-width: 58px;
       }
+      .result-row-add.in-list { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 16%, var(--surface2)); }
       .result-row-add:disabled { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 16%, var(--surface2)); opacity: 1; }
 
       /* ---------- Detail sheet ---------- */
