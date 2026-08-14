@@ -7,13 +7,28 @@
 //   2. If not cached, fetch live from the real source, map it into the shape the
 //      app expects, cache it for next time, then return it.
 //
+// ANIME SOURCE ORDER: Jikan (MyAnimeList) → Kitsu → AniList.
+// Jikan has the richest data when it's up. Kitsu is tried next because — unlike
+// AniList — it has real, structured per-episode data (titles, air dates), so a
+// Jikan outage doesn't mean losing real episode titles, just falling back to a
+// slightly different source for them. AniList is the last resort: reliable uptime,
+// but its episode data is patchy (crowd-sourced streaming links), so it's better
+// used only when nothing else is available.
+//
 // Setup on Vercel (one-time):
 //   1. In your Vercel project → Storage tab → Create Database → KV (this auto-adds
 //      the KV_* environment variables and installs @vercel/kv for you).
 //   2. Settings → Environment Variables → add TMDB_API_KEY (your TMDB key).
 //   3. Deploy. That's it — no code changes needed beyond this file.
 
-import { kv } from '@vercel/kv';
+// Loaded dynamically and defensively — if @vercel/kv isn't installed correctly for any
+// reason, the whole function must not crash. Caching just becomes a no-op instead.
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 const CACHE_SECONDS = 60 * 60 * 24 * 7; // 7 days — search results don't change often
@@ -89,10 +104,61 @@ async function searchSeriesLive(q, tmdbKey) {
     }));
 }
 
-// AniList is a completely independent service from MyAnimeList/Jikan — used only as
-// a fallback when Jikan can't answer a specific search (down, rate-limited, or
-// temporarily blocking that one query), so a single bad query never means "no anime
-// results at all."
+async function searchAnimeJikan(q) {
+  const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(q)}&limit=15&sfw=true`);
+  if (!res.ok) throw new Error('jikan search failed');
+  const data = await res.json();
+  const list = data.data || [];
+  if (list.length === 0) throw new Error('jikan search empty');
+  return list.map(a => ({
+    source: 'jikan', type: 'anime', subtype: a.type || null, externalId: `jikan-${a.mal_id}`,
+    title: a.title_english || a.title,
+    altTitles: [a.title, a.title_english, a.title_japanese].filter(Boolean),
+    year: (a.aired && a.aired.from) ? a.aired.from.slice(0, 4) : (a.year || null),
+    posterUrl: (a.images && a.images.jpg && (a.images.jpg.large_image_url || a.images.jpg.image_url)) || null,
+    summary: a.synopsis || '',
+    episodes: a.episodes || null, runtimeMinutes: parseJikanDuration(a.duration), statusText: a.status,
+    ratingValue: a.score || null, ratingSource: 'MAL', popularityScore: a.members || 0,
+    trailerUrl: (a.trailer && (a.trailer.url || (a.trailer.youtube_id ? `https://www.youtube.com/watch?v=${a.trailer.youtube_id}` : null))) || null,
+    extraNote: (a.broadcast && a.broadcast.string) ? `Airing: ${a.broadcast.string}` : null,
+  }));
+}
+
+// Kitsu — tried when Jikan itself is unreachable. Unlike AniList, Kitsu has a real,
+// structured episode list (see api/[id]/episodes in App.tsx), so falling back here
+// keeps actual episode titles working instead of jumping straight to generic
+// "Episode 1, 2, 3..." placeholders.
+async function searchAnimeKitsu(q) {
+  const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(q)}&page[limit]=15`);
+  if (!res.ok) throw new Error('kitsu search failed');
+  const data = await res.json();
+  const list = data.data || [];
+  if (list.length === 0) throw new Error('kitsu search empty');
+  return list.map(a => {
+    const attrs = a.attributes || {};
+    const titles = attrs.titles || {};
+    const poster = attrs.posterImage || {};
+    return {
+      source: 'kitsu', type: 'anime',
+      subtype: attrs.subtype ? attrs.subtype.toUpperCase() : null,
+      externalId: `kitsu-${a.id}`,
+      title: attrs.canonicalTitle || titles.en || titles.en_jp || 'Untitled',
+      altTitles: [attrs.canonicalTitle, titles.en, titles.en_jp, titles.ja_jp].filter(Boolean),
+      year: attrs.startDate ? attrs.startDate.slice(0, 4) : null,
+      posterUrl: poster.large || poster.original || poster.medium || null,
+      summary: attrs.synopsis || '',
+      episodes: attrs.episodeCount || null, runtimeMinutes: attrs.episodeLength || null, statusText: attrs.status || null,
+      ratingValue: attrs.averageRating ? Math.round(attrs.averageRating) / 10 : null, ratingSource: 'Kitsu',
+      popularityScore: attrs.userCount || 0,
+      trailerUrl: attrs.youtubeVideoId ? `https://www.youtube.com/watch?v=${attrs.youtubeVideoId}` : null,
+      extraNote: null,
+    };
+  });
+}
+
+// AniList — last resort. Reliable uptime, but its episode-level data is limited
+// (crowd-sourced streaming links, not a real episode guide), so it's only used when
+// both Jikan and Kitsu can't answer.
 async function searchAnimeAniListFallback(q) {
   const query = `query ($search: String) { Page(page: 1, perPage: 15) { media(search: $search, type: ANIME) { id title { romaji english native } format status episodes duration averageScore popularity description(asHtml: false) coverImage { large } startDate { year } trailer { id site } } } }`;
   const realRes = await fetch('https://graphql.anilist.co', {
@@ -120,23 +186,13 @@ async function searchAnimeAniListFallback(q) {
 
 async function searchAnimeLive(q) {
   try {
-    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(q)}&limit=15&sfw=true`);
-    if (!res.ok) throw new Error('jikan search failed');
-    const data = await res.json();
-    return (data.data || []).map(a => ({
-      source: 'jikan', type: 'anime', subtype: a.type || null, externalId: `jikan-${a.mal_id}`,
-      title: a.title_english || a.title,
-      altTitles: [a.title, a.title_english, a.title_japanese].filter(Boolean),
-      year: (a.aired && a.aired.from) ? a.aired.from.slice(0, 4) : (a.year || null),
-      posterUrl: (a.images && a.images.jpg && (a.images.jpg.large_image_url || a.images.jpg.image_url)) || null,
-      summary: a.synopsis || '',
-      episodes: a.episodes || null, runtimeMinutes: parseJikanDuration(a.duration), statusText: a.status,
-      ratingValue: a.score || null, ratingSource: 'MAL', popularityScore: a.members || 0,
-      trailerUrl: (a.trailer && (a.trailer.url || (a.trailer.youtube_id ? `https://www.youtube.com/watch?v=${a.trailer.youtube_id}` : null))) || null,
-      extraNote: (a.broadcast && a.broadcast.string) ? `Airing: ${a.broadcast.string}` : null,
-    }));
+    return await searchAnimeJikan(q);
   } catch (e) {
-    return await searchAnimeAniListFallback(q);
+    try {
+      return await searchAnimeKitsu(q);
+    } catch (e2) {
+      return await searchAnimeAniListFallback(q);
+    }
   }
 }
 
@@ -147,15 +203,18 @@ export default async function handler(req, res) {
   }
 
   const cacheKey = `search:${type}:${q.toLowerCase().trim()}`;
+  const kv = await getKv();
 
   // 1. Try the cache first — this is what keeps search working even if TMDB or
   //    MyAnimeList is down, as long as *someone* has searched this before.
-  try {
-    const cached = await kv.get(cacheKey);
-    if (cached) {
-      return res.status(200).json({ results: cached, cached: true });
-    }
-  } catch (e) { /* KV unreachable — fall through to a live fetch */ }
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) {
+        return res.status(200).json({ results: cached, cached: true });
+      }
+    } catch (e) { /* KV unreachable — fall through to a live fetch */ }
+  }
 
   // 2. Not cached (or first time anyone's searched this) — fetch live.
   let results;
@@ -168,9 +227,11 @@ export default async function handler(req, res) {
   }
 
   // 3. Cache it for next time (best-effort — a caching failure shouldn't break the response).
-  try {
-    await kv.set(cacheKey, results, { ex: CACHE_SECONDS });
-  } catch (e) { /* not fatal */ }
+  if (kv) {
+    try {
+      await kv.set(cacheKey, results, { ex: CACHE_SECONDS });
+    } catch (e) { /* not fatal */ }
+  }
 
   return res.status(200).json({ results, cached: false });
 }
