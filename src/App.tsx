@@ -221,7 +221,14 @@ async function searchViaProxy(type, q) {
 }
 
 async function searchSeriesDB(q) { return searchViaProxy('series', q); }
-async function searchAnimeDB(q) { return searchViaProxy('anime', q); }
+async function searchAnimeDB(q) {
+  const raw = await searchViaProxy('anime', q);
+  // Collapse "Re:Zero Season 1 / Season 2 / Season 3" style duplicates into one
+  // entry before anything else in the app ever sees this list — see
+  // mergeAnimeSeasonEntries() for why this lives here instead of further downstream.
+  if (raw.length <= 1) return raw;
+  try { return await mergeAnimeSeasonEntries(raw); } catch (e) { return raw; }
+}
 async function searchMovieDB(q) { return searchViaProxy('movie', q); }
 
 // Retries once after a short pause — used by the remaining direct-to-source calls
@@ -458,6 +465,136 @@ async function fetchAnimeRelations(malId) {
   } catch (e) { return []; }
 }
 
+// Minimal single-anime lookup used only to order merged seasons chronologically and
+// to label them with their real name (e.g. "Re:Zero − Starting Life in Another World
+// Season 2" rather than a generic "Season 2").
+async function fetchAnimeBasicInfo(malId) {
+  try {
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.data;
+    if (!a) return null;
+    return {
+      malId: String(malId),
+      title: a.title_english || a.title,
+      airedFrom: (a.aired && a.aired.from) || null,
+      subtype: a.type || null,
+    };
+  } catch (e) { return null; }
+}
+
+// ---- Merging multi-season anime into a single library entry ----
+//
+// Previously this app tried to merge Sequel/Prequel chains (e.g. Re:Zero S1+S2+S3)
+// but had a real bug: each season independently discovered the full chain and
+// "absorbed" the others into itself, while ALL FIVE seasons still stayed as separate
+// visible entries in the results list — so a 5-season anime showed up 5 times, each
+// one wrongly claiming to contain all 5. That's why it got turned off.
+//
+// The fix here is the shared cache below: every id discovered while walking a chain
+// gets the SAME cached chain (same array), keyed by every id in it. That means
+// whichever season a search happens to surface first, resolving its chain always
+// gives the exact same group — so the dedup pass that follows only ever keeps ONE
+// representative per franchise, no matter which season triggered the lookup first.
+const animeMergeChainCache = new Map(); // malId (string) -> Promise<string[]>
+
+async function fetchAnimeMergeChainIds(malId) {
+  const startId = String(malId);
+  if (animeMergeChainCache.has(startId)) return animeMergeChainCache.get(startId);
+
+  const promise = (async () => {
+    const seen = new Set([startId]);
+    const queue = [startId];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const relations = await fetchAnimeRelations(current);
+      const relatedIds = relations
+        .filter(r => r.relation === 'Sequel' || r.relation === 'Prequel')
+        .flatMap(r => (r.entry || []).filter(e => e.type === 'anime'))
+        .map(e => String(e.mal_id));
+      for (const id of relatedIds) {
+        if (!seen.has(id)) { seen.add(id); queue.push(id); }
+      }
+    }
+    return Array.from(seen);
+  })();
+
+  animeMergeChainCache.set(startId, promise);
+  promise.then(ids => { ids.forEach(id => { if (!animeMergeChainCache.has(id)) animeMergeChainCache.set(id, promise); }); })
+    .catch(() => {});
+  return promise;
+}
+
+// Runs once over a raw anime results list (search or "you might also like") and
+// collapses every Sequel/Prequel chain down to a single representative entry —
+// the earliest-airing season present in that same list — tagged with the full list
+// of merged ids so the item modal can later pull every season's episodes.
+async function mergeAnimeSeasonEntries(animeList) {
+  if (!animeList || animeList.length <= 1) return animeList || [];
+  const processed = new Set();
+  const output = [];
+
+  for (const r of animeList) {
+    const malId = (r.externalId || '').replace('jikan-', '');
+    if (!malId || processed.has(malId)) continue;
+
+    let chainIds = [malId];
+    try {
+      const chain = await fetchAnimeMergeChainIds(malId);
+      if (chain && chain.length > 0) chainIds = chain;
+    } catch (e) { /* keep as single item on any failure */ }
+
+    chainIds.forEach(id => processed.add(id));
+
+    const presentInList = animeList.filter(x => chainIds.includes((x.externalId || '').replace('jikan-', '')));
+    const canonical = presentInList.reduce((best, cur) => {
+      if (!best) return cur;
+      const by = parseInt(best.year || '9999', 10);
+      const cy = parseInt(cur.year || '9999', 10);
+      return cy < by ? cur : best;
+    }, null) || r;
+
+    output.push(
+      chainIds.length > 1
+        ? { ...canonical, mergedAnimeIds: chainIds, seasonCount: chainIds.length }
+        : canonical
+    );
+  }
+  return output;
+}
+
+// Episode list for a merged (multi-season) anime item: one real Jikan malId per
+// season, ordered by air date, each kept as its own clearly-labeled season rather
+// than blended together — this is what makes "Season 1 / Season 2 / Season 3" show
+// up correctly instead of the old year-grouping confusion.
+async function fetchAnimeSeasonsMerged(malIds) {
+  const infos = (await Promise.all(malIds.map(id => fetchAnimeBasicInfo(id)))).filter(Boolean);
+  const ordered = infos.sort((a, b) => {
+    if (!a.airedFrom && !b.airedFrom) return 0;
+    if (!a.airedFrom) return 1;
+    if (!b.airedFrom) return -1;
+    return new Date(a.airedFrom) - new Date(b.airedFrom);
+  });
+
+  const seasons = [];
+  let seasonNum = 1;
+  for (const info of ordered) {
+    let eps = [];
+    try { eps = await fetchAnimeEpisodesForId(info.malId); } catch (e) { eps = []; }
+    if (eps.length === 0) continue;
+    seasons.push({
+      seasonNumber: seasonNum,
+      seasonTitle: info.title,
+      // Prefixed with the source malId so episode ids never collide across seasons
+      // that came from different underlying Jikan entries.
+      episodes: eps.map(e => ({ ...e, id: `${info.malId}-${e.id}` })),
+    });
+    seasonNum++;
+  }
+  return seasons;
+}
+
 async function fetchAnimeSeasons(malId) {
   const all = await fetchAnimeEpisodesForId(malId);
 
@@ -501,6 +638,7 @@ async function fetchAnimeSeasonsAniList(anilistId, totalEpisodesHint) {
 async function fetchSeasonsFor(item) {
   const dbId = (item.externalId || '').split('-').slice(1).join('-');
   if (item.type === 'series') return fetchSeriesSeasons(dbId);
+  if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) return fetchAnimeSeasonsMerged(item.mergedAnimeIds);
   if (item.externalId && item.externalId.startsWith('anilist-')) return fetchAnimeSeasonsAniList(dbId, item.totalEpisodes || item.episodes);
   return fetchAnimeSeasons(dbId);
 }
@@ -780,6 +918,9 @@ function ResultRow({ result, inLibrary, onOpen, onQuickAdd }) {
             {result.type === 'series' ? (result.statusText || result.year || '') : (result.year || '')}
             {result.type === 'anime' && result.subtype && result.subtype !== 'TV' && (
               <span className="chip chip-mini" style={{ '--c': '#F5A623' }}>{result.subtype}</span>
+            )}
+            {result.type === 'anime' && result.seasonCount > 1 && (
+              <span className="chip chip-mini" style={{ '--c': '#7ED957' }}>{result.seasonCount} seasons</span>
             )}
             <ExternalStars value={result.ratingValue} source={result.ratingSource} size={11} />
           </div>
@@ -1942,6 +2083,7 @@ function EpisodeRow({ ep, watched, onToggle }) {
 }
 
 function seasonLabel(season) {
+  if (season.seasonTitle) return `Season ${season.seasonNumber} — ${season.seasonTitle}`;
   if (season.seasonNumber === 'Unscheduled') return 'Unscheduled';
   if (season.seasonNumber === 0) return 'Specials';
   return `Season ${season.seasonNumber}`;
@@ -2273,7 +2415,10 @@ export default function App() {
     const now = new Date().toISOString();
     const isEpisodic = type !== 'movie';
     let watchedEpisodeIds = [];
-    let totalEpisodes = result.episodes || '';
+    // When a result represents multiple merged seasons, the individual result's own
+    // "episodes" count only reflects its own season — leave the total unset until the
+    // real merged episode list loads, rather than showing a misleadingly low number.
+    let totalEpisodes = (result.mergedAnimeIds && result.mergedAnimeIds.length > 1) ? '' : (result.episodes || '');
 
     // Marking "I've watched it" on a series/anime should check off every real episode too —
     // fetch the actual episode IDs so the checklist inside My Shows lines up correctly.
@@ -2298,6 +2443,10 @@ export default function App() {
       watchedEpisodeIds,
       summary: result.summary || '', // the show's own synopsis — kept separate from the user's own notes
       notes: '',
+      // Carries the full Sequel/Prequel chain forward so the item modal's episode list
+      // (fetchSeasonsFor) can pull every season, not just the one that was searched.
+      mergedAnimeIds: (result.mergedAnimeIds && result.mergedAnimeIds.length > 1) ? result.mergedAnimeIds : null,
+      seasonCount: result.seasonCount || null,
       dateAdded: now, dateWatched: status === 'completed' ? now : null,
     };
     persist([...items, newItem]);
