@@ -640,6 +640,17 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   // checking this one once it's live.
   { key: 'baki', pattern: /^baki\b/i },
   { key: 'girls-und-panzer', pattern: /^girls (und|and) panzer\b/i },
+  { key: 'tanya-evil', pattern: /^(the saga of tanya the evil|youjo senki)\b/i },
+  { key: 'link-click', pattern: /^link click\b/i },
+  { key: 'trapped-dating-sim', pattern: /^(trapped in a dating sim|otome game (no|wa) sekai)\b/i },
+  { key: 'polar-opposites', pattern: /^you and i are polar opposites\b/i },
+  { key: 'clevatess', pattern: /^clevatess\b/i },
+  { key: 'skeleton-knight', pattern: /^(skeleton knight in another world|gaikotsu kishi)\b/i },
+  { key: 'grand-blue', pattern: /^grand blue\b/i },
+  { key: '100-girlfriends', pattern: /^(the 100 girlfriends|100-?kanojo)\b/i },
+  { key: 'iruma-kun', pattern: /^(welcome to demon school|mairimashite)\b/i },
+  { key: 'hana-kimi', pattern: /^hana-?kimi\b/i },
+  { key: 'azur-lane', pattern: /^azur lane\b/i },
 ];
 
 function franchiseGroupKeyForTitle(title) {
