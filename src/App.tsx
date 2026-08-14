@@ -616,7 +616,7 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'fruits-basket', pattern: /^fruits basket\b/i },
   { key: 'one-punch-man', pattern: /^one[- ]punch man\b/i },
   { key: 'mob-psycho', pattern: /^mob psycho 100\b/i },
-  { key: 'kuroko-basket', pattern: /^(kuroko's basketball|kuroko no basu?ke(tto)?)\b/i },
+  { key: 'kuroko-basket', pattern: /^(kuroko's basketball|kuroko no basket(ball)?|kuroko no basu?ke(tto)?)\b/i },
   { key: 'ace-of-diamond', pattern: /^(ace of diamond|diamond no ace)\b/i },
   { key: 'yowamushi-pedal', pattern: /^yowamushi pedal\b/i },
   { key: 'free', pattern: /^free!/i },
@@ -702,8 +702,11 @@ async function mergeAnimeSeasonEntries(animeList) {
   // shouldn't get swallowed into the merged "seasons" list.
   const byFranchiseKey = new Map();
   animeList.forEach((r, idx) => {
-    const isTv = !r.subtype || String(r.subtype).toUpperCase() === 'TV';
-    if (!isTv) return;
+    // TV and ONA (Netflix-original releases, e.g. Baki) both count as "real seasons"
+    // eligible for merging. Movies, OVAs, Specials, and Music videos stay excluded —
+    // those are side content that shouldn't get swallowed into the main season list.
+    const isEligible = !r.subtype || ['TV', 'ONA'].includes(String(r.subtype).toUpperCase());
+    if (!isEligible) return;
     const key = franchiseGroupKeyForTitle(r.title);
     if (!key) return;
     if (!byFranchiseKey.has(key)) byFranchiseKey.set(key, []);
