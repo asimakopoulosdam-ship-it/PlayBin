@@ -43,11 +43,24 @@ async function fetchWithRetry(url, retries = 2, delayMs = 900) {
   }
 }
 
+// Trending Now should mean "already out and popular", not "generating buzz before
+// release" — TMDB's own trending endpoint mixes both, so anything with a known
+// future release/air date gets filtered out here. Items with no date info at all
+// are kept (nothing to compare against).
+function isAlreadyReleased(dateStr) {
+  if (!dateStr) return true;
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return true;
+  return d.getTime() <= Date.now();
+}
+
 async function trendingMoviesLive(tmdbKey, page) {
   const res = await fetchWithRetry(`https://api.themoviedb.org/3/trending/movie/week?api_key=${tmdbKey}&language=en-US&page=${page}`);
   if (!res.ok) throw new Error('tmdb trending movie failed');
   const data = await res.json();
-  return (data.results || []).slice(0, PER_PAGE).map(m => ({
+  return (data.results || [])
+    .filter(m => isAlreadyReleased(m.release_date))
+    .slice(0, PER_PAGE).map(m => ({
     source: 'tmdb', type: 'movie', externalId: `tmdb-${m.id}`, tmdbId: m.id,
     title: m.title,
     year: m.release_date ? m.release_date.slice(0, 4) : null,
@@ -67,6 +80,7 @@ async function trendingSeriesLive(tmdbKey, page) {
   const data = await res.json();
   return (data.results || [])
     .filter(s => !(s.original_language === 'ja' && (s.genre_ids || []).includes(16)))
+    .filter(s => isAlreadyReleased(s.first_air_date))
     .slice(0, PER_PAGE).map(s => ({
       source: 'tmdb', type: 'series', externalId: `tmdbtv-${s.id}`, tmdbId: s.id,
       title: s.name,
@@ -109,7 +123,7 @@ async function trendingAnimeLiveKitsu(page) {
   const res = await fetchWithRetry(`https://kitsu.io/api/edge/trending/anime`);
   if (!res.ok) throw new Error('kitsu trending failed');
   const data = await res.json();
-  const list = (data.data || []).slice(0, PER_PAGE);
+  const list = (data.data || []).filter(a => isAlreadyReleased(a.attributes && a.attributes.startDate)).slice(0, PER_PAGE);
   if (list.length === 0) throw new Error('kitsu trending empty');
   return list.map(a => {
     const attrs = a.attributes || {};
