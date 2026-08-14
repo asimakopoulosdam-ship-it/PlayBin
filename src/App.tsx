@@ -513,17 +513,64 @@ async function fetchAnimeBasicInfo(malId) {
 // whichever season a search happens to surface first, resolving its chain always
 // gives the exact same group — so the dedup pass that follows only ever keeps ONE
 // representative per franchise, no matter which season triggered the lookup first.
+// ---- Manual overrides for known multi-season franchises ----
+//
+// A handful of major franchises (long-running or split into numbered "parts" like
+// Bleach) either have messy/incomplete relation data on Jikan, or need their chain
+// resolved even while Jikan's live relations endpoint is down. This list is checked
+// FIRST, before any network call — if a season's id is in here, the whole chain
+// resolves instantly from this list, no live lookup needed at all.
+//
+// IMPORTANT: this only lists WHICH Jikan ids belong together, in order. It does NOT
+// hardcode any episode data — episode titles, air dates, and counts are still always
+// fetched live (Jikan, or Kitsu/AniList if Jikan is down) per season id, so they stay
+// current automatically. Add a new line here only when a whole new season/part of a
+// franchise is announced — that's rare, so this needs almost no upkeep.
+const ANIME_FRANCHISE_OVERRIDES = [
+  // Bleach -> Bleach: Thousand-Year Blood War Parts 1-3 (Part 4 "The Calamity" not
+  // yet added — its Jikan id wasn't confirmed with full certainty. To add it: search
+  // "Bleach Calamity" on myanimelist.net, copy the number from the URL
+  // (myanimelist.net/anime/NUMBER/...), and append it to this array.)
+  ['269', '41467', '53998', '56784'],
+];
+const ANIME_OVERRIDE_LOOKUP = new Map();
+ANIME_FRANCHISE_OVERRIDES.forEach(chain => chain.forEach(id => ANIME_OVERRIDE_LOOKUP.set(id, chain)));
+
+// ---- Title-based franchise grouping (works across Jikan/Kitsu/AniList alike) ----
+//
+// The id-based overrides above only help when a season's id is a genuine Jikan id.
+// During an actual Jikan outage, search results for a franchise come from Kitsu or
+// AniList instead — sources with their own, unrelated id numbering — so id matching
+// alone can't merge them. Title matching does: whichever database found "Bleach:
+// Thousand-Year Blood War - The Separation", it still starts with "Bleach", so it
+// still groups with every other Bleach season regardless of source.
+//
+// Add a new { key, pattern } here only for franchises that keep showing up split
+// into confusing duplicate seasons; this list is intentionally short; everything
+// else still merges automatically via live Jikan relations when Jikan is reachable.
+const ANIME_TITLE_FRANCHISE_GROUPS = [
+  { key: 'bleach', pattern: /^bleach\b/i },
+];
+
+function franchiseGroupKeyForTitle(title) {
+  const t = (title || '').trim();
+  const group = ANIME_TITLE_FRANCHISE_GROUPS.find(g => g.pattern.test(t));
+  return group ? group.key : null;
+}
+
 const animeMergeChainCache = new Map(); // malId (string) -> Promise<string[]>
 
 async function fetchAnimeMergeChainIds(malId) {
   const startId = String(malId);
 
   // Only real Jikan/MAL ids are plain numbers. Anime results that came from the
-  // AniList fallback (used when Jikan itself is down) carry ids like "anilist-269" —
-  // sending those to Jikan's relations endpoint just produced endless 504/429s and
-  // froze the whole search. Those simply don't get merged; everything else about
-  // them (poster, title, add-to-library) still works normally.
+  // AniList or Kitsu fallback (used when Jikan itself is down) carry ids like
+  // "anilist-269" or "kitsu-269" — those simply don't get merged this way (title
+  // grouping above handles the known cases instead); everything else about them
+  // (poster, title, add-to-library) still works normally.
   if (!/^\d+$/.test(startId)) return [startId];
+
+  if (ANIME_OVERRIDE_LOOKUP.has(startId)) return ANIME_OVERRIDE_LOOKUP.get(startId);
 
   if (animeMergeChainCache.has(startId)) return animeMergeChainCache.get(startId);
 
@@ -551,17 +598,43 @@ async function fetchAnimeMergeChainIds(malId) {
 }
 
 // Runs once over a raw anime results list (search or "you might also like") and
-// collapses every Sequel/Prequel chain down to a single representative entry —
-// the earliest-airing season present in that same list — tagged with the full list
-// of merged ids so the item modal can later pull every season's episodes.
+// collapses every known franchise down to a single representative entry — the
+// earliest-airing season present in that same list — tagged with every merged
+// member's full info so the item modal can later pull every season's real episodes,
+// regardless of which database each season came from.
 async function mergeAnimeSeasonEntries(animeList) {
   if (!animeList || animeList.length <= 1) return animeList || [];
   const processed = new Set();
   const output = [];
 
+  // Pass 1: title-based franchise groups (works across Jikan/Kitsu/AniList). Only
+  // TV-format entries are eligible — a side movie/OVA sharing the franchise name
+  // shouldn't get swallowed into the merged "seasons" list.
+  const byFranchiseKey = new Map();
+  animeList.forEach((r, idx) => {
+    const isTv = !r.subtype || String(r.subtype).toUpperCase() === 'TV';
+    if (!isTv) return;
+    const key = franchiseGroupKeyForTitle(r.title);
+    if (!key) return;
+    if (!byFranchiseKey.has(key)) byFranchiseKey.set(key, []);
+    byFranchiseKey.get(key).push({ r, idx });
+  });
+
+  byFranchiseKey.forEach((members) => {
+    if (members.length <= 1) return; // nothing to merge, leave it alone
+    members.forEach(({ r }) => processed.add(r.externalId));
+    const sorted = [...members].sort((a, b) => parseInt(a.r.year || '9999', 10) - parseInt(b.r.year || '9999', 10));
+    const canonical = sorted[0].r;
+    const meta = sorted.map(({ r }) => ({ externalId: r.externalId, title: r.title, year: r.year, episodes: r.episodes }));
+    output.push({ ...canonical, mergedAnimeIds: meta.map(m => m.externalId), mergedAnimeMeta: meta, seasonCount: meta.length });
+  });
+
+  // Pass 2: whatever's left, try the id-based Jikan relations chain (only works for
+  // genuinely Jikan-sourced entries — see fetchAnimeMergeChainIds).
   for (const r of animeList) {
+    if (processed.has(r.externalId)) continue;
     const malId = (r.externalId || '').replace('jikan-', '');
-    if (!malId || processed.has(malId)) continue;
+    if (!malId) continue;
 
     let chainIds = [malId];
     try {
@@ -569,9 +642,9 @@ async function mergeAnimeSeasonEntries(animeList) {
       if (chain && chain.length > 0) chainIds = chain;
     } catch (e) { /* keep as single item on any failure */ }
 
-    chainIds.forEach(id => processed.add(id));
-
     const presentInList = animeList.filter(x => chainIds.includes((x.externalId || '').replace('jikan-', '')));
+    presentInList.forEach(x => processed.add(x.externalId));
+
     const canonical = presentInList.reduce((best, cur) => {
       if (!best) return cur;
       const by = parseInt(best.year || '9999', 10);
@@ -579,12 +652,16 @@ async function mergeAnimeSeasonEntries(animeList) {
       return cy < by ? cur : best;
     }, null) || r;
 
-    output.push(
-      chainIds.length > 1
-        ? { ...canonical, mergedAnimeIds: chainIds, seasonCount: chainIds.length }
-        : canonical
-    );
+    if (chainIds.length > 1) {
+      const meta = presentInList
+        .sort((a, b) => parseInt(a.year || '9999', 10) - parseInt(b.year || '9999', 10))
+        .map(x => ({ externalId: x.externalId, title: x.title, year: x.year, episodes: x.episodes }));
+      output.push({ ...canonical, mergedAnimeIds: chainIds, mergedAnimeMeta: meta, seasonCount: chainIds.length });
+    } else {
+      output.push(canonical);
+    }
   }
+
   return output;
 }
 
@@ -718,10 +795,46 @@ async function fetchAnimeSeasonsAniList(anilistId, totalEpisodesHint) {
   } catch (e) { return []; }
 }
 
+// Episode list for a franchise merged across POSSIBLY DIFFERENT sources (e.g. one
+// season found via Jikan, another via Kitsu because Jikan was briefly down that day).
+// Each member fetches its episodes through its own normal per-source path — nothing
+// here is hardcoded except which seasons belong together — then everything is
+// stitched into one ordered, clearly-labeled list.
+async function fetchAnimeSeasonsAcrossSources(members) {
+  const perMember = await Promise.all(members.map(async (m) => {
+    try {
+      const dbId = (m.externalId || '').split('-').slice(1).join('-');
+      let subSeasons = [];
+      if (m.externalId.startsWith('kitsu-')) subSeasons = await fetchAnimeSeasonsKitsu(dbId);
+      else if (m.externalId.startsWith('anilist-')) subSeasons = await fetchAnimeSeasonsAniList(dbId, m.episodes);
+      else if (m.externalId.startsWith('jikan-')) subSeasons = await fetchAnimeSeasons(dbId);
+      return { member: m, subSeasons };
+    } catch (e) { return { member: m, subSeasons: [] }; }
+  }));
+
+  const flattened = [];
+  perMember.forEach(({ member, subSeasons }) => {
+    if (!subSeasons || subSeasons.length === 0) return;
+    if (subSeasons.length === 1) {
+      flattened.push({ seasonTitle: member.title, episodes: subSeasons[0].episodes });
+    } else {
+      // The member itself already split into multiple year-based groups (e.g. a
+      // very long-running original series) — keep those, just labeled under this
+      // season's own name too so it's clear which part of the franchise they're in.
+      subSeasons.forEach(s => {
+        flattened.push({ seasonTitle: `${member.title} — ${seasonLabel(s)}`, episodes: s.episodes });
+      });
+    }
+  });
+
+  return flattened.map((s, i) => ({ seasonNumber: i + 1, seasonTitle: s.seasonTitle, episodes: s.episodes }));
+}
+
 // Same shape either way, so callers don't need to branch on type themselves.
 async function fetchSeasonsFor(item) {
   const dbId = (item.externalId || '').split('-').slice(1).join('-');
   if (item.type === 'series') return fetchSeriesSeasons(dbId);
+  if (item.mergedAnimeMeta && item.mergedAnimeMeta.length > 1) return fetchAnimeSeasonsAcrossSources(item.mergedAnimeMeta);
   if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) return fetchAnimeSeasonsMerged(item.mergedAnimeIds);
   if (item.externalId && item.externalId.startsWith('kitsu-')) return fetchAnimeSeasonsKitsu(dbId);
   if (item.externalId && item.externalId.startsWith('anilist-')) return fetchAnimeSeasonsAniList(dbId, item.totalEpisodes || item.episodes);
@@ -2531,6 +2644,7 @@ export default function App() {
       // Carries the full Sequel/Prequel chain forward so the item modal's episode list
       // (fetchSeasonsFor) can pull every season, not just the one that was searched.
       mergedAnimeIds: (result.mergedAnimeIds && result.mergedAnimeIds.length > 1) ? result.mergedAnimeIds : null,
+      mergedAnimeMeta: (result.mergedAnimeMeta && result.mergedAnimeMeta.length > 1) ? result.mergedAnimeMeta : null,
       seasonCount: result.seasonCount || null,
       dateAdded: now, dateWatched: status === 'completed' ? now : null,
     };
