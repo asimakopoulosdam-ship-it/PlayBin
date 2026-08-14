@@ -3,12 +3,12 @@
 // Supports ?page=N so Discover can keep loading more as you scroll, not just a fixed
 // first batch.
 //
-// FIX: each category (movie / series / anime) is now cached SEPARATELY instead of
-// caching the combined result as one block. Before, if Jikan (anime) failed even
-// once while TMDB succeeded, the empty anime list still got cached together with
-// movie+series for 6 hours — so the Anime tab showed nothing until the cache expired,
-// even after Jikan came back. Now a failure in one category never affects the others,
-// and only the failed category is retried live on the next request.
+// Each category (movie / series / anime) is cached SEPARATELY, so a failure in one
+// never poisons the cache for the others.
+//
+// ANIME SOURCE ORDER: Jikan → Kitsu → AniList — same reasoning as api/search.js.
+// Kitsu's own "trending" endpoint doesn't support paging the same way Jikan's does,
+// so it's only used for page 1; deeper pages fall through to AniList if Jikan is down.
 
 // Loaded dynamically and defensively — if @vercel/kv isn't installed correctly for any
 // reason, the whole function must not crash. Caching just becomes a no-op instead.
@@ -81,11 +81,13 @@ async function trendingSeriesLive(tmdbKey, page) {
     }));
 }
 
-async function trendingAnimeLive(page) {
+async function trendingAnimeLiveJikan(page) {
   const res = await fetchWithRetry(`https://api.jikan.moe/v4/top/anime?filter=airing&limit=${PER_PAGE}&page=${page}`);
   if (!res.ok) throw new Error('jikan trending failed');
   const data = await res.json();
-  return (data.data || []).map(a => ({
+  const list = data.data || [];
+  if (list.length === 0) throw new Error('jikan trending empty');
+  return list.map(a => ({
     source: 'jikan', type: 'anime', subtype: a.type || null, externalId: `jikan-${a.mal_id}`,
     title: a.title_english || a.title,
     altTitles: [a.title, a.title_english, a.title_japanese].filter(Boolean),
@@ -99,10 +101,98 @@ async function trendingAnimeLive(page) {
   }));
 }
 
+// Kitsu's trending endpoint isn't paginated the way Jikan's is — it just returns its
+// current top list — so this only ever serves page 1. Deeper pages skip straight to
+// AniList if Jikan is unavailable.
+async function trendingAnimeLiveKitsu(page) {
+  if (page > 1) throw new Error('kitsu trending has no page beyond 1');
+  const res = await fetchWithRetry(`https://kitsu.io/api/edge/trending/anime`);
+  if (!res.ok) throw new Error('kitsu trending failed');
+  const data = await res.json();
+  const list = (data.data || []).slice(0, PER_PAGE);
+  if (list.length === 0) throw new Error('kitsu trending empty');
+  return list.map(a => {
+    const attrs = a.attributes || {};
+    const titles = attrs.titles || {};
+    const poster = attrs.posterImage || {};
+    return {
+      source: 'kitsu', type: 'anime',
+      subtype: attrs.subtype ? attrs.subtype.toUpperCase() : null,
+      externalId: `kitsu-${a.id}`,
+      title: attrs.canonicalTitle || titles.en || titles.en_jp || 'Untitled',
+      altTitles: [attrs.canonicalTitle, titles.en, titles.en_jp, titles.ja_jp].filter(Boolean),
+      year: attrs.startDate ? attrs.startDate.slice(0, 4) : null,
+      posterUrl: poster.large || poster.original || poster.medium || null,
+      summary: attrs.synopsis || '',
+      episodes: attrs.episodeCount || null, runtimeMinutes: attrs.episodeLength || null, statusText: attrs.status || null,
+      ratingValue: attrs.averageRating ? Math.round(attrs.averageRating) / 10 : null, ratingSource: 'Kitsu',
+      popularityScore: attrs.userCount || 0,
+      trailerUrl: attrs.youtubeVideoId ? `https://www.youtube.com/watch?v=${attrs.youtubeVideoId}` : null,
+      extraNote: null,
+    };
+  });
+}
+
+// Used only when Jikan AND Kitsu are both unreachable — AniList's own "currently
+// trending anime" list, same shape as everywhere else so the frontend never has to
+// know which source it came from.
+async function trendingAnimeLiveAniList(page) {
+  const query = `query ($page: Int, $perPage: Int) {
+    Page(page: $page, perPage: $perPage) {
+      media(type: ANIME, sort: TRENDING_DESC, status: RELEASING) {
+        id
+        title { romaji english native }
+        format
+        status
+        episodes
+        averageScore
+        popularity
+        description(asHtml: false)
+        coverImage { large }
+        startDate { year }
+        trailer { id site }
+        nextAiringEpisode { episode airingAt }
+      }
+    }
+  }`;
+  const res = await fetch('https://graphql.anilist.co', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ query, variables: { page, perPage: PER_PAGE } }),
+  });
+  if (!res.ok) throw new Error('anilist trending failed');
+  const data = await res.json();
+  const list = (data.data && data.data.Page && data.data.Page.media) || [];
+  return list.map(a => ({
+    source: 'anilist', type: 'anime', subtype: a.format || null, externalId: `anilist-${a.id}`,
+    title: a.title.english || a.title.romaji,
+    altTitles: [a.title.romaji, a.title.english, a.title.native].filter(Boolean),
+    year: (a.startDate && a.startDate.year) || null,
+    posterUrl: (a.coverImage && a.coverImage.large) || null,
+    summary: (a.description || '').replace(/<[^>]+>/g, ''),
+    episodes: a.episodes || null, runtimeMinutes: null, statusText: a.status || null,
+    ratingValue: a.averageScore ? Math.round(a.averageScore) / 10 : null, ratingSource: 'AniList',
+    popularityScore: a.popularity || 0,
+    trailerUrl: (a.trailer && a.trailer.site === 'youtube') ? `https://www.youtube.com/watch?v=${a.trailer.id}` : null,
+    extraNote: (a.nextAiringEpisode) ? `Next episode: ${new Date(a.nextAiringEpisode.airingAt * 1000).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}` : null,
+  }));
+}
+
+async function trendingAnimeLive(page) {
+  try {
+    return await trendingAnimeLiveJikan(page);
+  } catch (e) {
+    try {
+      return await trendingAnimeLiveKitsu(page);
+    } catch (e2) {
+      return await trendingAnimeLiveAniList(page);
+    }
+  }
+}
+
 // Fetches ONE category, trying the cache first, falling back to a live fetch, and
-// caching only that category on success. A failure here returns [] without ever
-// touching the cache — so a bad Jikan moment never gets "locked in" for 6 hours,
-// and the next request will simply try Jikan live again.
+// caching only that category on success. A failure returns [] without ever touching
+// the cache — so a bad moment for a source never gets "locked in" for 6 hours.
 async function getCategory(kv, cacheKey, liveFn) {
   if (kv) {
     try {
