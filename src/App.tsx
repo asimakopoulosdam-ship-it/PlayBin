@@ -593,7 +593,7 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'bungo-stray-dogs', pattern: /^bungou? stray dogs\b/i },
   { key: 'seraph-end', pattern: /^(seraph of the end|owari no seraph)\b/i },
   { key: 'blue-lock', pattern: /^blue lock\b/i },
-  { key: 'dr-stone', pattern: /^dr\.? stone\b/i },
+  { key: 'dr-stone', pattern: /^dr\.?\s*stone\b/i },
   { key: 'quintessential-quintuplets', pattern: /^(the quintessential quintuplets|go-?toubun no hanayome)\b/i },
   { key: 'takagi-san', pattern: /^(karakai jouzu no takagi-san|teasing master takagi-san)\b/i },
 ];
