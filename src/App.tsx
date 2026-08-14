@@ -306,6 +306,12 @@ async function fetchSimilarTitles(item) {
         }));
     }
     if (item.type === 'anime') {
+      // dbId here is only a real Jikan/MAL id for items that came from Jikan in the
+      // first place. For AniList-sourced items (externalId "anilist-XXXX", used when
+      // Jikan was down at search time), that same number means something completely
+      // different on MAL — querying Jikan's recommendations with it would silently
+      // return recommendations for the WRONG anime instead of just failing. Skip it.
+      if (!item.externalId.startsWith('jikan-')) return [];
       const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}/recommendations`);
       if (!res.ok) return [];
       const data = await res.json();
@@ -377,6 +383,10 @@ async function fetchUpcomingForItems(candidates) {
     }
 
     if (it.type === 'anime') {
+      // Only a genuine Jikan/MAL id means anything here — for Kitsu- or AniList-
+      // sourced items the same number refers to a totally different anime on MAL,
+      // so querying Jikan with it would silently show the wrong countdown.
+      if (!it.externalId || !it.externalId.startsWith('jikan-')) return null;
       const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}`);
       if (!res.ok) return null;
       const data = await res.json();
@@ -624,6 +634,66 @@ async function fetchAnimeSeasons(malId) {
   return seasons;
 }
 
+// Kitsu — used for anime items that were found via the Kitsu fallback (when Jikan
+// was down at search time). Unlike AniList, Kitsu has a real per-episode endpoint
+// with actual titles and air dates, so this keeps the "Episodes" list meaningful
+// instead of falling back to generic "Episode 1, 2, 3..." placeholders.
+async function fetchAnimeEpisodesKitsu(kitsuId) {
+  let all = [];
+  let offset = 0;
+  const limit = 20;
+  const HARD_CAP = 2000; // safety net for absurdly long-running shows
+  while (offset < HARD_CAP) {
+    const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/episodes?page[limit]=${limit}&page[offset]=${offset}&sort=number`);
+    if (!res.ok) break;
+    const data = await res.json();
+    const page = (data.data || []).map(e => {
+      const attrs = e.attributes || {};
+      const titles = attrs.titles || {};
+      return {
+        id: `kitsuep${e.id}`,
+        number: attrs.number,
+        name: attrs.canonicalTitle || titles.en || titles.en_jp || null,
+        airdate: attrs.airdate || null,
+        seasonNumber: attrs.seasonNumber || null,
+      };
+    });
+    all = all.concat(page);
+    if (page.length < limit) break;
+    offset += limit;
+  }
+  return all;
+}
+
+async function fetchAnimeSeasonsKitsu(kitsuId) {
+  const all = await fetchAnimeEpisodesKitsu(kitsuId);
+
+  // Kitsu sometimes tags episodes with their own seasonNumber directly — use that
+  // when present (most accurate), otherwise fall back to grouping by air year like
+  // the Jikan path does.
+  const hasSeasonNumbers = all.some(e => e.seasonNumber != null);
+  if (hasSeasonNumbers) {
+    const bySeason = {};
+    all.forEach(e => {
+      const sn = e.seasonNumber || 1;
+      if (!bySeason[sn]) bySeason[sn] = [];
+      bySeason[sn].push(e);
+    });
+    return Object.keys(bySeason).sort((a, b) => a - b).map(sn => ({ seasonNumber: Number(sn), episodes: bySeason[sn] }));
+  }
+
+  const byYear = {};
+  all.forEach(e => {
+    const year = e.airdate ? e.airdate.slice(0, 4) : 'unscheduled';
+    if (!byYear[year]) byYear[year] = [];
+    byYear[year].push(e);
+  });
+  const years = Object.keys(byYear).filter(y => y !== 'unscheduled').sort((a, b) => a - b);
+  const seasons = years.map(y => ({ seasonNumber: y, episodes: byYear[y] }));
+  if (byYear.unscheduled) seasons.push({ seasonNumber: 'Unscheduled', episodes: byYear.unscheduled });
+  return seasons;
+}
+
 // AniList only shows up for anime Jikan couldn't answer (see the search fallback) —
 // it doesn't expose a rich per-episode title list the way Jikan does, so each related
 // entry becomes a simple numbered checklist from its own episode count. Less detail
@@ -653,6 +723,7 @@ async function fetchSeasonsFor(item) {
   const dbId = (item.externalId || '').split('-').slice(1).join('-');
   if (item.type === 'series') return fetchSeriesSeasons(dbId);
   if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) return fetchAnimeSeasonsMerged(item.mergedAnimeIds);
+  if (item.externalId && item.externalId.startsWith('kitsu-')) return fetchAnimeSeasonsKitsu(dbId);
   if (item.externalId && item.externalId.startsWith('anilist-')) return fetchAnimeSeasonsAniList(dbId, item.totalEpisodes || item.episodes);
   return fetchAnimeSeasons(dbId);
 }
