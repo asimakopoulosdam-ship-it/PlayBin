@@ -614,6 +614,32 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   // Alchemist above — different adaptations of the same manga, grouped together
   // on purpose per request.
   { key: 'fruits-basket', pattern: /^fruits basket\b/i },
+  { key: 'one-punch-man', pattern: /^one[- ]punch man\b/i },
+  { key: 'mob-psycho', pattern: /^mob psycho 100\b/i },
+  { key: 'kuroko-basket', pattern: /^(kuroko's basketball|kuroko no basu?ke(tto)?)\b/i },
+  { key: 'ace-of-diamond', pattern: /^(ace of diamond|diamond no ace)\b/i },
+  { key: 'yowamushi-pedal', pattern: /^yowamushi pedal\b/i },
+  { key: 'free', pattern: /^free!/i },
+  { key: 'prince-of-tennis', pattern: /^(the prince of tennis|tennis no ouji-?sama)\b/i },
+  { key: 'saiki-k', pattern: /^(the disastrous life of saiki k|saiki kusuo)\b/i },
+  { key: 'march-lion', pattern: /^(march comes in like a lion|san-?gatsu no lion)\b/i },
+  { key: 'silver-spoon', pattern: /^(silver spoon|gin no saji)\b/i },
+  { key: 'clannad', pattern: /^clannad\b/i },
+  { key: 'haruhi', pattern: /^(the melancholy of haruhi suzumiya|suzumiya haruhi no yuu?utsu)\b/i },
+  { key: 'goblin-slayer', pattern: /^goblin slayer\b/i },
+  { key: 'beastars', pattern: /^beastars\b/i },
+  { key: '86-eighty-six', pattern: /^(86|eighty-six)\b/i },
+  { key: 'tower-of-god', pattern: /^tower of god\b/i },
+  { key: 'god-of-high-school', pattern: /^the god of high school\b/i },
+  { key: 'zom-100', pattern: /^zom\s?100\b/i },
+  { key: 'ranking-of-kings', pattern: /^(ranking of kings|ousama ranking)\b/i },
+  { key: 'kakegurui', pattern: /^kakegurui\b/i },
+  // Messiest entry on this list — spans multiple studios/eras (Baki the Grappler
+  // 2001, the 2018 Netflix Baki, Baki Hanma, Baki Dou). All grouped together on
+  // purpose, same call as Fullmetal Alchemist/Fruits Basket above. Worth double
+  // checking this one once it's live.
+  { key: 'baki', pattern: /^baki\b/i },
+  { key: 'girls-und-panzer', pattern: /^girls (und|and) panzer\b/i },
 ];
 
 function franchiseGroupKeyForTitle(title) {
