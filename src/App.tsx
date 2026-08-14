@@ -550,6 +550,52 @@ ANIME_FRANCHISE_OVERRIDES.forEach(chain => chain.forEach(id => ANIME_OVERRIDE_LO
 // else still merges automatically via live Jikan relations when Jikan is reachable.
 const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'bleach', pattern: /^bleach\b/i },
+  { key: 'mha', pattern: /^(my hero academia|boku no hero academia)\b/i },
+  { key: 'aot', pattern: /^(attack on titan|shingeki no kyojin)\b/i },
+  { key: 'demon-slayer', pattern: /^(demon slayer|kimetsu no yaiba)\b/i },
+  { key: 'jjk', pattern: /^jujutsu kaisen\b/i },
+  { key: 'fairy-tail', pattern: /^fairy tail\b/i },
+  { key: 'black-clover', pattern: /^black clover\b/i },
+  { key: 'haikyuu', pattern: /^haiky[uū]+/i },
+  { key: 'sao', pattern: /^sword art online\b/i },
+  { key: 'fire-force', pattern: /^(fire force|enen no shouboutai)\b/i },
+  { key: 'promised-neverland', pattern: /^(the )?promised neverland\b/i },
+  { key: 'tokyo-ghoul', pattern: /^tokyo ghoul\b/i },
+  { key: 're-zero', pattern: /^re[:\s-]*zero\b/i },
+  { key: 'mushoku-tensei', pattern: /^mushoku tensei\b/i },
+  { key: 'slime', pattern: /^(that time i got reincarnated as a slime|tensei shitara slime datta ken)\b/i },
+  { key: 'overlord', pattern: /^overlord\b/i },
+  { key: 'konosuba', pattern: /^(konosuba|kono subarashii sekai)\b/i },
+  { key: 'classroom-elite', pattern: /^classroom of the elite\b/i },
+  { key: 'vinland-saga', pattern: /^vinland saga\b/i },
+  { key: 'made-in-abyss', pattern: /^made in abyss\b/i },
+  { key: 'rent-a-gf', pattern: /^(rent-a-girlfriend|kanojo,? okarishimasu)\b/i },
+  { key: 'hxh', pattern: /^hunter\s*[x×]\s*hunter\b/i },
+  { key: 'assassination-classroom', pattern: /^(assassination classroom|ansatsu kyoushitsu)\b/i },
+  { key: 'shield-hero', pattern: /^(the rising of the shield hero|tate no yuusha)\b/i },
+  { key: 'food-wars', pattern: /^(food wars|shokugeki no soma)\b/i },
+  { key: 'steins-gate', pattern: /^steins;?gate\b/i },
+  // Note: merges the 2003 original with Brotherhood on purpose, per request — they're
+  // different adaptations of the same manga, not sequential seasons, but grouped
+  // together here anyway since that's what was asked for.
+  { key: 'fma', pattern: /^fullmetal alchemist\b/i },
+  { key: 'danmachi', pattern: /^(danmachi|is it wrong to try to pick up girls)\b/i },
+  { key: '7-deadly-sins', pattern: /^(the seven deadly sins|nanatsu no taizai)\b/i },
+  { key: 'log-horizon', pattern: /^log horizon\b/i },
+  { key: 'hanako-kun', pattern: /^(toilet-bound hanako-kun|jibaku shounen hanako-kun)\b/i },
+  { key: 'code-geass', pattern: /^code geass\b/i },
+  { key: 'noragami', pattern: /^noragami\b/i },
+  { key: 'devil-part-timer', pattern: /^the devil is a part-timer\b/i },
+  { key: 'irregular-magic-hs', pattern: /^(the irregular at magic high school|mahouka koukou no rettousei)\b/i },
+  { key: 'world-trigger', pattern: /^world trigger\b/i },
+  { key: 'kaguya-sama', pattern: /^kaguya-sama\b/i },
+  { key: 'spy-x-family', pattern: /^spy\s*[x×]\s*family\b/i },
+  { key: 'bungo-stray-dogs', pattern: /^bungou? stray dogs\b/i },
+  { key: 'seraph-end', pattern: /^(seraph of the end|owari no seraph)\b/i },
+  { key: 'blue-lock', pattern: /^blue lock\b/i },
+  { key: 'dr-stone', pattern: /^dr\.? stone\b/i },
+  { key: 'quintessential-quintuplets', pattern: /^(the quintessential quintuplets|go-?toubun no hanayome)\b/i },
+  { key: 'takagi-san', pattern: /^(karakai jouzu no takagi-san|teasing master takagi-san)\b/i },
 ];
 
 function franchiseGroupKeyForTitle(title) {
@@ -630,17 +676,24 @@ async function mergeAnimeSeasonEntries(animeList) {
   });
 
   // Pass 2: whatever's left, try the id-based Jikan relations chain (only works for
-  // genuinely Jikan-sourced entries — see fetchAnimeMergeChainIds).
-  for (const r of animeList) {
-    if (processed.has(r.externalId)) continue;
-    const malId = (r.externalId || '').replace('jikan-', '');
-    if (!malId) continue;
+  // genuinely Jikan-sourced entries — see fetchAnimeMergeChainIds). Every distinct
+  // franchise is resolved IN PARALLEL rather than one at a time — each lookup is an
+  // independent network call, so doing them sequentially was the main reason search
+  // felt slow whenever several different multi-season anime showed up in one query.
+  const remaining = animeList.filter(r => !processed.has(r.externalId));
+  const candidateIds = Array.from(new Set(
+    remaining.map(r => (r.externalId || '').replace('jikan-', '')).filter(id => /^\d+$/.test(id))
+  ));
+  const chainResults = await Promise.all(candidateIds.map(async (id) => {
+    try { return [id, await fetchAnimeMergeChainIds(id)]; }
+    catch (e) { return [id, [id]]; }
+  }));
+  const chainById = new Map(chainResults);
 
-    let chainIds = [malId];
-    try {
-      const chain = await fetchAnimeMergeChainIds(malId);
-      if (chain && chain.length > 0) chainIds = chain;
-    } catch (e) { /* keep as single item on any failure */ }
+  remaining.forEach((r) => {
+    if (processed.has(r.externalId)) return; // already claimed by an earlier group in this pass
+    const malId = (r.externalId || '').replace('jikan-', '');
+    const chainIds = chainById.get(malId) || [malId];
 
     const presentInList = animeList.filter(x => chainIds.includes((x.externalId || '').replace('jikan-', '')));
     presentInList.forEach(x => processed.add(x.externalId));
@@ -660,7 +713,7 @@ async function mergeAnimeSeasonEntries(animeList) {
     } else {
       output.push(canonical);
     }
-  }
+  });
 
   return output;
 }
