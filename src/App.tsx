@@ -3090,6 +3090,10 @@ function GlobalStyle() {
         background: #000 !important; background-image: none !important;
         --surface: #000; --surface2: #0A0A0A; --border: #222;
       }
+      .mode-bw .bottom-nav,
+      .mode-neon-black .bottom-nav {
+        background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.98)) !important;
+      }
       .mode-neon :is(.result-row, .item-row, .upcoming-item-row, .im-card, .modal,
         .season-row, .ep-row, .history-chip, .tab-btn, .type-tile, .bottom-nav,
         .search-box, .discover-top, .time-card, .profile-card, .type-breakdown,
