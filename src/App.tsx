@@ -1576,6 +1576,10 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
   const [zapLoading, setZapLoading] = useState(false);
   const [zapLoadingMore, setZapLoadingMore] = useState(false);
   const [zapPage, setZapPage] = useState(1);
+  const zapFetchingRef = useRef(false); // ref, not state — state updates are batched/async and
+  // let multiple rapid "need more" calls slip past a plain state-based guard before
+  // the first one finishes; a ref is read/written synchronously so it actually blocks.
+  const zapSeenPagesRef = useRef(new Set());
 
   // Re-fetch the popular deck whenever Zapping turns on, or the type filter changes
   // while it's already on — Movies tab zaps popular movies, Anime tab zaps popular
@@ -1585,6 +1589,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     setZapLoading(true);
     setZapItems(null);
     setZapPage(1);
+    zapSeenPagesRef.current = new Set([1]);
     const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
     fetchPopular(zapType, 1)
       .then(raw => mergeAnimeWithinTrendingBatch(raw))
@@ -1803,17 +1808,33 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
                 onQuickAdd={onQuickAdd}
                 onOpen={openResult}
                 onNeedMore={() => {
-                  if (zapLoadingMore) return;
+                  if (zapFetchingRef.current) return; // synchronous guard — blocks overlapping calls that a state-based check would miss
+                  zapFetchingRef.current = true;
                   setZapLoadingMore(true);
-                  const nextPage = zapPage + 1;
+                  // Pick a random not-yet-seen page from a wide pool (up to 20 pages of
+                  // "popular", not just the next one in sequence) so the deck feels
+                  // varied instead of always the same handful of titles in the same order.
+                  let nextPage = zapPage + 1;
+                  for (let attempt = 0; attempt < 8; attempt++) {
+                    const candidate = 1 + Math.floor(Math.random() * 20);
+                    if (!zapSeenPagesRef.current.has(candidate)) { nextPage = candidate; break; }
+                  }
+                  zapSeenPagesRef.current.add(nextPage);
                   const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
                   fetchPopular(zapType, nextPage).then(async more => {
                     if (more.length > 0) {
                       more = await mergeAnimeWithinTrendingBatch(more);
-                      setZapItems(prev => [...(prev || []), ...more]);
+                      setZapItems(prev => {
+                        const existingIds = new Set((prev || []).map(r => r.externalId));
+                        const deduped = more.filter(r => !existingIds.has(r.externalId));
+                        return [...(prev || []), ...deduped];
+                      });
                       setZapPage(nextPage);
                     }
-                  }).finally(() => setZapLoadingMore(false));
+                  }).finally(() => {
+                    zapFetchingRef.current = false;
+                    setZapLoadingMore(false);
+                  });
                 }}
               />
             )
@@ -3090,6 +3111,13 @@ export default function App() {
   // no form to fill in. status defaults to 'planned' (from the row's quick-add +) but the
   // detail sheet can pass 'completed' for "I've watched it" straight away.
   const quickAddFromResult = async (result, status = 'planned') => {
+    // Guard against duplicates at the source — the "+" button already disables
+    // itself once something's in the library, but paths like Zapping's swipe
+    // gesture don't go through that same disabled-state check, so the guard
+    // belongs here too rather than relying on every caller to remember it.
+    const existingItem = items.find(i => i.externalId === result.externalId && i.type === result.type);
+    if (existingItem) return existingItem;
+
     const type = TYPE_META[result.type] ? result.type : 'movie';
     const now = new Date().toISOString();
     const isEpisodic = type !== 'movie';
