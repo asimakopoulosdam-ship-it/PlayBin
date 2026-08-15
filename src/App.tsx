@@ -37,7 +37,8 @@ const SEARCH_HISTORY_KEY = 'wl-search-history-v1';
 const APPEARANCE_MODE_KEY = 'wl-appearance-mode-v1';
 const APPEARANCE_MODES = [
   { key: 'normal', label: 'Normal' },
-  { key: 'bw', label: 'Black & white' },
+  { key: 'dark', label: 'Dark mode' },
+  { key: 'white', label: 'White mode' },
   { key: 'neon', label: 'Neon' },
   { key: 'neon-black', label: 'Neon (black bg)' },
 ];
@@ -1995,7 +1996,7 @@ function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, 
             ))}
           </div>
           <p className="dim" style={{ marginTop: 10 }}>
-            Black &amp; white keeps posters and cover art in color, everything else turns grayscale. Neon boosts saturation across the app.
+            Dark and White mode keep posters, cover art, and colored labels in their real colors — only plain navigation/menu chrome turns neutral. Neon boosts saturation across the app.
           </p>
         </div>
 
@@ -3045,31 +3046,57 @@ function GlobalStyle() {
       .appearance-mode-btn { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); font-size: 13px; font-weight: 600; text-align: left; }
       .appearance-mode-btn.active { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 12%, var(--surface2)); }
 
-      /* Black & white: menus/nav/chrome go grayscale, and every navy surface in the
+      /* Dark mode: menus/nav/chrome go grayscale, and every navy surface in the
          app (cards, rows, modals, buttons — anything using --surface/--surface2)
          turns pure black via the underlying variables, so nothing gets missed.
-         Posters and cover art are real images, untouched by either the filter or
-         these variables, so they keep their real colors throughout. */
-      .mode-bw {
+         Posters, cover art, and anything carrying its own brand/type color (page
+         titles, type tiles, the Upcoming button, "X you've added" labels, the
+         active bottom-nav item) keep their real colors throughout. */
+      .mode-dark {
         background: #000 !important; background-image: none !important;
         --surface: #000; --surface2: #0A0A0A; --border: #222;
       }
-      .mode-bw .bottom-nav,
-      .mode-bw .tabs-row,
-      .mode-bw .search-box,
-      .mode-bw .sort-row,
-      .mode-bw .backup-row,
-      .mode-bw .upcoming-row,
-      .mode-bw .profile-card,
-      .mode-bw .time-card,
-      .mode-bw .modal-head,
-      .mode-bw .history-chips,
-      .mode-bw .history-head,
-      .mode-bw .group-title,
-      .mode-bw .cloud-status,
-      .mode-bw .report-bug-link,
-      .mode-bw .splash-mid,
-      .mode-bw .settings-gear-btn {
+      .mode-dark .tabs-row,
+      .mode-dark .search-box,
+      .mode-dark .sort-row,
+      .mode-dark .backup-row,
+      .mode-dark .profile-card,
+      .mode-dark .time-card,
+      .mode-dark .modal-head,
+      .mode-dark .history-chips,
+      .mode-dark .history-head,
+      .mode-dark .cloud-status,
+      .mode-dark .report-bug-link,
+      .mode-dark .splash-mid,
+      .mode-dark .settings-gear-btn {
+        filter: grayscale(1);
+      }
+
+      /* White mode: same idea as Dark mode, inverted — light surfaces, dark
+         readable text, plain chrome desaturated, brand/type colors and posters
+         stay exactly as colorful as usual. */
+      .mode-white {
+        background: #F2F2F0 !important; background-image: none !important;
+        --bg: #F2F2F0; --surface: #FFFFFF; --surface2: #ECECEA; --border: #DADAD6;
+        --text: #14161F; --muted: #6B7280;
+      }
+      .mode-white .bottom-nav {
+        background: linear-gradient(180deg, rgba(255,255,255,0.85), rgba(242,242,240,0.98)) !important;
+        border-top-color: #DADAD6;
+      }
+      .mode-white .tabs-row,
+      .mode-white .search-box,
+      .mode-white .sort-row,
+      .mode-white .backup-row,
+      .mode-white .profile-card,
+      .mode-white .time-card,
+      .mode-white .modal-head,
+      .mode-white .history-chips,
+      .mode-white .history-head,
+      .mode-white .cloud-status,
+      .mode-white .report-bug-link,
+      .mode-white .splash-mid,
+      .mode-white .settings-gear-btn {
         filter: grayscale(1);
       }
 
@@ -3083,7 +3110,7 @@ function GlobalStyle() {
         background: #000 !important; background-image: none !important;
         --surface: #000; --surface2: #0A0A0A; --border: #222;
       }
-      .mode-bw .bottom-nav,
+      .mode-dark .bottom-nav,
       .mode-neon-black .bottom-nav {
         background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.98)) !important;
       }
