@@ -1184,29 +1184,29 @@ function SplashScreen({ onDone }) {
 
 /* ---------------------------------- Search result card + strip ---------------------------------- */
 
-function UpcomingResultRow({ result, onOpen }) {
-  const meta = TYPE_META[result.type];
-  const Icon = meta.icon;
-  const days = result.releaseDate ? daysUntil(result.releaseDate) : null;
+function UpcomingTimeline({ rows }) {
   return (
-    <button className="upcoming-item-row" onClick={() => onOpen(result)}>
-      <div className="upcoming-item-poster">
-        {result.posterUrl ? <img src={result.posterUrl} alt="" /> : <Icon size={18} />}
-      </div>
-      <div className="upcoming-item-info">
-        <div className="upcoming-item-title">{result.title}</div>
-        <div className="upcoming-item-meta">
-          <span className="chip chip-mini" style={{ '--c': meta.color }}>{meta.singular}</span>
-          {result.extraNote}
+    <div className="upcoming-timeline">
+      <div className="upcoming-timeline-track" />
+      {rows.map(r => (
+        <div className="upcoming-timeline-row" key={r.id}>
+          <div className="upcoming-timeline-badge-col">
+            <div className="upcoming-timeline-day">{r.days != null ? (r.days <= 0 ? 'Now' : r.days) : '–'}</div>
+            {r.days != null && r.days > 0 && <span className="upcoming-timeline-unit">Days</span>}
+          </div>
+          <button className="upcoming-timeline-content" onClick={r.onOpen}>
+            <div className="upcoming-timeline-poster">
+              {r.posterUrl ? <img src={r.posterUrl} alt="" /> : <r.icon size={18} />}
+            </div>
+            <div className="upcoming-timeline-info">
+              <div className="upcoming-timeline-title">{r.title}</div>
+              {r.metaLine && <div className="upcoming-timeline-meta-row"><r.icon size={12} />{r.metaLine}</div>}
+              {r.dateLine && <div className="upcoming-timeline-meta-row"><Clock3 size={12} />{r.dateLine}</div>}
+            </div>
+          </button>
         </div>
-      </div>
-      {days != null && days >= 0 && (
-        <div className="countdown-badge">
-          <div className="countdown-n">{days === 0 ? 'Today' : days}</div>
-          {days !== 0 && <div className="countdown-u">days</div>}
-        </div>
-      )}
-    </button>
+      ))}
+    </div>
   );
 }
 
@@ -1679,11 +1679,16 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
             const filtered = q ? upcomingGlobal.filter(r => r.title.toLowerCase().includes(q)) : upcomingGlobal;
             if (filtered.length === 0) return <p className="dim" style={{ padding: '10px 2px' }}>No upcoming titles match "{upcomingQuery}".</p>;
             return (
-              <div className="item-list">
-                {filtered.map(r => (
-                  <UpcomingResultRow key={r.externalId} result={r} onOpen={openResult} />
-                ))}
-              </div>
+              <UpcomingTimeline rows={filtered.map(r => ({
+                id: r.externalId,
+                title: r.title,
+                posterUrl: r.posterUrl,
+                icon: TYPE_META[r.type].icon,
+                metaLine: r.extraNote,
+                dateLine: r.releaseDate ? formatDateGr(r.releaseDate) : null,
+                days: r.releaseDate ? daysUntil(r.releaseDate) : null,
+                onOpen: () => openResult(r),
+              }))} />
             );
           })()}
         </div>
@@ -1822,23 +1827,6 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
   );
 }
 
-function UpcomingRow({ entry, onOpen }) {
-  const { item, days, label } = entry;
-  return (
-    <button className="upcoming-item-row" onClick={onOpen}>
-      <Poster item={item} size={48} />
-      <div className="upcoming-item-info">
-        <div className="upcoming-item-title">{item.title}</div>
-        <div className="upcoming-item-meta">{label}</div>
-      </div>
-      <div className="countdown-badge">
-        <div className="countdown-n">{days === 0 ? 'Today' : days}</div>
-        {days !== 0 && <div className="countdown-u">days</div>}
-      </div>
-    </button>
-  );
-}
-
 function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, onAdvanceEpisode, onMarkAllWatched }) {
   const [activeType, setActiveType] = useState('movie');
   const [sortBy, setSortBy] = useState('recent');
@@ -1886,11 +1874,16 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
             <EmptyState text="Nothing upcoming right now." cta="Shows you're watching or plan to watch will show here once dates are announced" />
           )}
           {!loadingUpcoming && upcomingList && upcomingList.length > 0 && (
-            <div className="item-list">
-              {upcomingList.map(u => (
-                <UpcomingRow key={u.item.id} entry={u} onOpen={() => onOpen(u.item)} />
-              ))}
-            </div>
+            <UpcomingTimeline rows={upcomingList.map(u => ({
+              id: u.item.id,
+              title: u.item.title,
+              posterUrl: u.item.posterUrl,
+              icon: TYPE_META[u.item.type].icon,
+              metaLine: u.label,
+              dateLine: null,
+              days: u.days,
+              onOpen: () => onOpen(u.item),
+            }))} />
           )}
         </div>
       ) : (
@@ -3249,6 +3242,19 @@ function GlobalStyle() {
       .show-more-btn:disabled { opacity: 0.6; }
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .upcoming-timeline { position: relative; padding-left: 4px; }
+      .upcoming-timeline-track { position: absolute; left: 26px; top: 22px; bottom: 22px; width: 4px; border-radius: 4px; background: linear-gradient(180deg, #B6F09C, #7ED957, #3F8F1F); }
+      .upcoming-timeline-row { display: flex; gap: 14px; margin-bottom: 26px; position: relative; }
+      .upcoming-timeline-row:last-child { margin-bottom: 0; }
+      .upcoming-timeline-badge-col { width: 52px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
+      .upcoming-timeline-day { width: 44px; height: 44px; border-radius: 50%; background: #7ED957; color: #173404; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; box-shadow: 0 0 0 4px var(--bg); position: relative; z-index: 1; flex-shrink: 0; }
+      .upcoming-timeline-unit { color: var(--text); font-size: 9px; font-weight: 700; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .upcoming-timeline-content { display: flex; gap: 10px; flex: 1; text-align: left; background: none; border: none; padding: 4px 0 0; min-width: 0; }
+      .upcoming-timeline-poster { width: 52px; height: 72px; border-radius: 8px; overflow: hidden; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); flex-shrink: 0; }
+      .upcoming-timeline-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .upcoming-timeline-info { min-width: 0; }
+      .upcoming-timeline-title { font-weight: 700; font-size: 14px; color: var(--text); margin-bottom: 6px; line-height: 1.25; }
+      .upcoming-timeline-meta-row { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; margin-bottom: 4px; }
       .upcoming-row { display: flex; justify-content: center; margin-bottom: 20px; }
       .upcoming-circle { position: relative; width: 78px; height: 78px; border-radius: 50%; background: radial-gradient(circle at 30% 25%, color-mix(in srgb, #7ED957 30%, var(--surface)), var(--surface)); border: 1.5px solid color-mix(in srgb, #7ED957 45%, var(--border)); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: #7ED957; }
       .upcoming-circle span:last-child { font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em; }
