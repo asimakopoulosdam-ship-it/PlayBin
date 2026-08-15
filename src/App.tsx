@@ -1466,9 +1466,29 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
   // then rebuilds the list in its original order with the merged entries in place.
   const mergeAnimeWithinTrendingBatch = async (batch) => {
     const animeItems = batch.filter(r => r.type === 'anime');
-    if (animeItems.length <= 1) return batch;
-    let mergedAnime = animeItems;
-    try { mergedAnime = await mergeAnimeSeasonEntries(animeItems); } catch (e) { return batch; }
+    if (animeItems.length === 0) return batch;
+    let mergedAnime = animeItems.length > 1 ? animeItems : animeItems;
+    if (animeItems.length > 1) {
+      try { mergedAnime = await mergeAnimeSeasonEntries(animeItems); } catch (e) { mergedAnime = animeItems; }
+    }
+    // Trending only ever contains what's currently popular/airing — a franchise's
+    // OTHER seasons usually aren't trending themselves, so they never make it into
+    // this batch to merge against. For anything recognized as a known multi-season
+    // franchise that's still on its own after the batch-only merge, do a quick
+    // background search (the same one the Search tab uses) to pull in its full
+    // season set instead of just whichever one happens to be trending.
+    mergedAnime = await Promise.all(mergedAnime.map(async (item) => {
+      if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) return item; // already merged
+      const key = franchiseGroupKeyForTitle(item.title);
+      if (!key) return item;
+      try {
+        const query = item.title.split(':')[0].replace(/\s+season\s*\d+$/i, '').trim();
+        const searchResults = await searchAnimeDB(query);
+        const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
+        return fullMatch || item;
+      } catch (e) { return item; }
+    }));
+
     const mergedById = new Map(mergedAnime.map(a => [a.externalId, a]));
     const seen = new Set();
     return batch
