@@ -3088,12 +3088,27 @@ function GlobalStyle() {
       }
 
       /* Neon: same navy background as usual, colors pushed brighter/more saturated
-         across the whole app. */
-      .mode-neon { filter: saturate(1.9) contrast(1.08) brightness(1.04); }
+         across the whole app. transform+will-change forces GPU compositing — without
+         it, mobile Safari/Chrome fail to repaint new content added inside a filtered,
+         dynamically-growing container (e.g. loading more via "Show more") until the
+         page is scrolled. */
+      .mode-neon { filter: saturate(1.9) contrast(1.08) brightness(1.04); transform: translateZ(0); will-change: filter; }
 
       /* Neon (black bg): same saturation boost, but on a pure black canvas instead
-         of the usual navy. */
-      .mode-neon-black { filter: saturate(1.9) contrast(1.08) brightness(1.04); background: #000 !important; background-image: none !important; }
+         of the usual navy — including the individual card/row backgrounds, not just
+         the page behind them. */
+      .mode-neon-black { filter: saturate(1.9) contrast(1.08) brightness(1.04); background: #000 !important; background-image: none !important; transform: translateZ(0); will-change: filter; }
+      .mode-neon-black .result-row,
+      .mode-neon-black .item-row,
+      .mode-neon-black .upcoming-item-row,
+      .mode-neon-black .im-card,
+      .mode-neon-black .modal,
+      .mode-neon-black .season-row,
+      .mode-neon-black .ep-row,
+      .mode-neon-black .history-chip {
+        background: #000 !important;
+        border-color: #222 !important;
+      }
 
       /* ---------- Splash ---------- */
       .splash { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; animation: splash-fade 1.5s ease forwards; cursor: pointer; }
