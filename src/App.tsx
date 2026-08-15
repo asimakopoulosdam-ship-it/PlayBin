@@ -3,7 +3,7 @@ import {
   Tv2, Clapperboard, Sparkles, LayoutList, Search, CircleUserRound,
   Plus, X, Star, Clock3, CheckCircle2, PlayCircle, ArrowLeft, Trash2,
   ListChecks, Ticket, Flame, Loader2, Pencil, Check, PlayCircle as PlayIcon,
-  CalendarDays, Film, Settings as SettingsIcon
+  CalendarDays, Film, Settings as SettingsIcon, ChevronDown
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -1957,6 +1957,20 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   );
 }
 
+function AccordionSection({ title, accentColor, defaultOpen, children }) {
+  const [open, setOpen] = useState(!!defaultOpen);
+  return (
+    <div className="im-card">
+      <div className="im-card-accent" style={{ background: accentColor }} />
+      <button className="accordion-header" onClick={() => setOpen(o => !o)}>
+        <span className="im-card-label" style={{ margin: 0 }}>{title}</span>
+        <ChevronDown size={16} className={`accordion-chevron ${open ? 'open' : ''}`} />
+      </button>
+      {open && <div className="accordion-body">{children}</div>}
+    </div>
+  );
+}
+
 function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, onExport, onImportClick, importMsg }) {
   useBodyScrollLock();
   return (
@@ -1967,22 +1981,7 @@ function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, 
           <button className="icon-x" onClick={onClose}><X size={18} /></button>
         </div>
 
-        <div className="im-card">
-          <div className="im-card-accent" style={{ background: '#4FA8FF' }} />
-          <div className="im-card-label">Help</div>
-          <p className="im-description">Need a hand with something? Send us a message and we'll get back to you.</p>
-          <a
-            className="report-bug-link"
-            style={{ marginTop: 10 }}
-            href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Playbin Help')}`}
-          >
-            <Flame size={14} /> Contact support
-          </a>
-        </div>
-
-        <div className="im-card">
-          <div className="im-card-accent" style={{ background: '#8892B0' }} />
-          <div className="im-card-label">Appearance</div>
+        <AccordionSection title="Appearance" accentColor="#8892B0" defaultOpen>
           <div className="appearance-mode-list">
             {APPEARANCE_MODES.map(m => (
               <button
@@ -1998,11 +1997,9 @@ function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, 
           <p className="dim" style={{ marginTop: 10 }}>
             Dark and White mode keep posters, cover art, and colored labels in their real colors — only plain navigation/menu chrome turns neutral. Neon boosts saturation across the app.
           </p>
-        </div>
+        </AccordionSection>
 
-        <div className="im-card">
-          <div className="im-card-accent" style={{ background: '#7ED957' }} />
-          <div className="im-card-label">Account status</div>
+        <AccordionSection title="Account status" accentColor="#7ED957">
           {session ? (
             <div className="cloud-status" style={{ marginBottom: 0 }}>
               <CheckCircle2 size={15} />
@@ -2011,11 +2008,9 @@ function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, 
           ) : (
             <p className="dim">Not connected to Google — your library lives on this device only.</p>
           )}
-        </div>
+        </AccordionSection>
 
-        <div className="im-card">
-          <div className="im-card-accent" style={{ background: '#F5A623' }} />
-          <div className="im-card-label">Backup</div>
+        <AccordionSection title="Backup" accentColor="#F5A623">
           <div className="backup-row" style={{ marginTop: 0 }}>
             <button className="backup-btn" onClick={onExport}>
               <Ticket size={14} /> Export backup
@@ -2025,7 +2020,18 @@ function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, 
             </button>
           </div>
           {importMsg && <p className="dim" style={{ textAlign: 'center', marginTop: 8 }}>{importMsg}</p>}
-        </div>
+        </AccordionSection>
+
+        <AccordionSection title="Help" accentColor="#4FA8FF">
+          <p className="im-description">Need a hand with something? Send us a message and we'll get back to you.</p>
+          <a
+            className="report-bug-link"
+            style={{ marginTop: 10 }}
+            href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Playbin Help')}`}
+          >
+            <Flame size={14} /> Contact support
+          </a>
+        </AccordionSection>
       </div>
     </div>
   );
@@ -3045,6 +3051,10 @@ function GlobalStyle() {
       .appearance-mode-list { display: flex; flex-direction: column; gap: 6px; }
       .appearance-mode-btn { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); font-size: 13px; font-weight: 600; text-align: left; }
       .appearance-mode-btn.active { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 12%, var(--surface2)); }
+      .accordion-header { display: flex; align-items: center; justify-content: space-between; width: 100%; text-align: left; }
+      .accordion-chevron { transition: transform 0.15s ease; color: var(--muted); flex-shrink: 0; }
+      .accordion-chevron.open { transform: rotate(180deg); }
+      .accordion-body { margin-top: 10px; }
 
       /* Dark mode: menus/nav/chrome go grayscale, and every navy surface in the
          app (cards, rows, modals, buttons — anything using --surface/--surface2)
