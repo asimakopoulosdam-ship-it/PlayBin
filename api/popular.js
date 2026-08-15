@@ -34,8 +34,12 @@ async function fetchWithRetry(url, retries = 2, delayMs = 900) {
 }
 
 async function popularMoviesLive(tmdbKey, page) {
-  const res = await fetchWithRetry(`https://api.themoviedb.org/3/movie/popular?api_key=${tmdbKey}&language=en-US&page=${page}`);
-  if (!res.ok) throw new Error('tmdb popular movie failed');
+  // top_rated (not popular) on purpose — TMDB's "popular" endpoint skews toward
+  // recent buzz, which ends up close to Trending Now. top_rated surfaces the
+  // acclaimed, widely-loved films regardless of when they came out — Matrix,
+  // Titanic, Avengers-type "everyone's seen this or should" territory.
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/movie/top_rated?api_key=${tmdbKey}&language=en-US&page=${page}`);
+  if (!res.ok) throw new Error('tmdb top rated movie failed');
   const data = await res.json();
   return (data.results || []).slice(0, PER_PAGE).map(m => ({
     source: 'tmdb', type: 'movie', externalId: `tmdb-${m.id}`, tmdbId: m.id,
@@ -50,8 +54,8 @@ async function popularMoviesLive(tmdbKey, page) {
 }
 
 async function popularSeriesLive(tmdbKey, page) {
-  const res = await fetchWithRetry(`https://api.themoviedb.org/3/tv/popular?api_key=${tmdbKey}&language=en-US&page=${page}`);
-  if (!res.ok) throw new Error('tmdb popular tv failed');
+  const res = await fetchWithRetry(`https://api.themoviedb.org/3/tv/top_rated?api_key=${tmdbKey}&language=en-US&page=${page}`);
+  if (!res.ok) throw new Error('tmdb top rated tv failed');
   const data = await res.json();
   return (data.results || [])
     .filter(s => !(s.original_language === 'ja' && (s.genre_ids || []).includes(16)))
