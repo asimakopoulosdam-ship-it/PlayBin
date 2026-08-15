@@ -3045,10 +3045,15 @@ function GlobalStyle() {
       .appearance-mode-btn { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); font-size: 13px; font-weight: 600; text-align: left; }
       .appearance-mode-btn.active { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 12%, var(--surface2)); }
 
-      /* Black & white: menus/nav/chrome go grayscale and card backgrounds turn pure
-         black, but posters, cover art, and colored badges/chips (which sit beside —
-         not filtered by — this chrome) keep their real colors. */
-      .mode-bw { background: #000 !important; background-image: none !important; }
+      /* Black & white: menus/nav/chrome go grayscale, and every navy surface in the
+         app (cards, rows, modals, buttons — anything using --surface/--surface2)
+         turns pure black via the underlying variables, so nothing gets missed.
+         Posters and cover art are real images, untouched by either the filter or
+         these variables, so they keep their real colors throughout. */
+      .mode-bw {
+        background: #000 !important; background-image: none !important;
+        --surface: #000; --surface2: #0A0A0A; --border: #222;
+      }
       .mode-bw .bottom-nav,
       .mode-bw .tabs-row,
       .mode-bw .discover-top,
@@ -3074,40 +3079,30 @@ function GlobalStyle() {
       .mode-bw .settings-gear-btn {
         filter: grayscale(1);
       }
-      .mode-bw .result-row,
-      .mode-bw .item-row,
-      .mode-bw .upcoming-item-row,
-      .mode-bw .im-card,
-      .mode-bw .modal,
-      .mode-bw .season-row,
-      .mode-bw .ep-row,
-      .mode-bw .similar-card .similar-poster,
-      .mode-bw .history-chip {
-        background: #000 !important;
-        border-color: #222 !important;
+
+      /* Neon: colors pushed brighter/more saturated. The filter is applied per-card
+         (not to the whole growing app container) on purpose — mobile Safari/Chrome
+         fail to repaint NEW content appended inside an already-filtered, dynamically
+         growing container (e.g. loading more via "Show more") until the page is
+         scrolled. Applying filter to each individually-mounted card instead avoids
+         that bug entirely, since every new card paints fresh with its own filter. */
+      .mode-neon-black {
+        background: #000 !important; background-image: none !important;
+        --surface: #000; --surface2: #0A0A0A; --border: #222;
       }
-
-      /* Neon: same navy background as usual, colors pushed brighter/more saturated
-         across the whole app. transform+will-change forces GPU compositing — without
-         it, mobile Safari/Chrome fail to repaint new content added inside a filtered,
-         dynamically-growing container (e.g. loading more via "Show more") until the
-         page is scrolled. */
-      .mode-neon { filter: saturate(1.9) contrast(1.08) brightness(1.04); transform: translateZ(0); will-change: filter; }
-
-      /* Neon (black bg): same saturation boost, but on a pure black canvas instead
-         of the usual navy — including the individual card/row backgrounds, not just
-         the page behind them. */
-      .mode-neon-black { filter: saturate(1.9) contrast(1.08) brightness(1.04); background: #000 !important; background-image: none !important; transform: translateZ(0); will-change: filter; }
-      .mode-neon-black .result-row,
-      .mode-neon-black .item-row,
-      .mode-neon-black .upcoming-item-row,
-      .mode-neon-black .im-card,
-      .mode-neon-black .modal,
-      .mode-neon-black .season-row,
-      .mode-neon-black .ep-row,
-      .mode-neon-black .history-chip {
-        background: #000 !important;
-        border-color: #222 !important;
+      .mode-neon :is(.result-row, .item-row, .upcoming-item-row, .im-card, .modal,
+        .season-row, .ep-row, .history-chip, .tab-btn, .type-tile, .bottom-nav,
+        .search-box, .discover-top, .time-card, .profile-card, .type-breakdown,
+        .cloud-status, .google-signin-btn, .report-bug-link, .splash-mid, .type-stat,
+        .time-chip, .backup-btn, .settings-gear-btn, .appearance-mode-btn, .seg-btn,
+        .choice-btn, .save-btn, .add-btn, .sort-btn, .history-head),
+      .mode-neon-black :is(.result-row, .item-row, .upcoming-item-row, .im-card, .modal,
+        .season-row, .ep-row, .history-chip, .tab-btn, .type-tile, .bottom-nav,
+        .search-box, .discover-top, .time-card, .profile-card, .type-breakdown,
+        .cloud-status, .google-signin-btn, .report-bug-link, .splash-mid, .type-stat,
+        .time-chip, .backup-btn, .settings-gear-btn, .appearance-mode-btn, .seg-btn,
+        .choice-btn, .save-btn, .add-btn, .sort-btn, .history-head) {
+        filter: saturate(1.9) contrast(1.08) brightness(1.04);
       }
 
       /* ---------- Splash ---------- */
