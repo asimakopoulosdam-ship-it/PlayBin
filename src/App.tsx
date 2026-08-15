@@ -350,6 +350,22 @@ function daysUntil(dateStr) {
   const days = Math.ceil((new Date(dateStr + 'T00:00:00') - new Date(new Date().toDateString())) / (1000 * 60 * 60 * 24));
   return days;
 }
+
+// Converts a raw day count into whatever unit reads best inside the countdown
+// circle — plain days for anything close, months once it's further out, years for
+// truly distant releases — so the circle never has to squeeze in an awkward number
+// like "412 Days".
+function formatCountdownBadge(days) {
+  if (days == null) return { value: '–', unit: '' };
+  if (days <= 0) return { value: 'Now', unit: '' };
+  if (days < 60) return { value: days, unit: days === 1 ? 'Day' : 'Days' };
+  if (days < 365) {
+    const months = Math.round(days / 30);
+    return { value: months, unit: months === 1 ? 'Month' : 'Months' };
+  }
+  const years = Math.round(days / 365);
+  return { value: years, unit: years === 1 ? 'Year' : 'Years' };
+}
 function daysUntilWeekday(dayName) {
   const names = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
   const idx = names.findIndex(d => dayName && dayName.toLowerCase().includes(d));
@@ -1188,24 +1204,29 @@ function UpcomingTimeline({ rows }) {
   return (
     <div className="upcoming-timeline">
       <div className="upcoming-timeline-track" />
-      {rows.map(r => (
-        <div className="upcoming-timeline-row" key={r.id}>
-          <div className="upcoming-timeline-badge-col">
-            <div className="upcoming-timeline-day">{r.days != null ? (r.days <= 0 ? 'Now' : r.days) : '–'}</div>
-            {r.days != null && r.days > 0 && <span className="upcoming-timeline-unit">Days</span>}
+      {rows.map(r => {
+        const badge = formatCountdownBadge(r.days);
+        return (
+          <div className="upcoming-timeline-row" key={r.id}>
+            <div className="upcoming-timeline-badge-col">
+              <div className="upcoming-timeline-day">
+                <span className="upcoming-timeline-day-n">{badge.value}</span>
+                {badge.unit && <span className="upcoming-timeline-day-u">{badge.unit}</span>}
+              </div>
+            </div>
+            <button className="upcoming-timeline-content" onClick={r.onOpen}>
+              <div className="upcoming-timeline-poster">
+                {r.posterUrl ? <img src={r.posterUrl} alt="" /> : <r.icon size={18} />}
+              </div>
+              <div className="upcoming-timeline-info">
+                <div className="upcoming-timeline-title">{r.title}</div>
+                {r.metaLine && <div className="upcoming-timeline-meta-row"><r.icon size={12} />{r.metaLine}</div>}
+                {r.dateLine && <div className="upcoming-timeline-meta-row"><Clock3 size={12} />{r.dateLine}</div>}
+              </div>
+            </button>
           </div>
-          <button className="upcoming-timeline-content" onClick={r.onOpen}>
-            <div className="upcoming-timeline-poster">
-              {r.posterUrl ? <img src={r.posterUrl} alt="" /> : <r.icon size={18} />}
-            </div>
-            <div className="upcoming-timeline-info">
-              <div className="upcoming-timeline-title">{r.title}</div>
-              {r.metaLine && <div className="upcoming-timeline-meta-row"><r.icon size={12} />{r.metaLine}</div>}
-              {r.dateLine && <div className="upcoming-timeline-meta-row"><Clock3 size={12} />{r.dateLine}</div>}
-            </div>
-          </button>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -3243,12 +3264,13 @@ function GlobalStyle() {
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
       .upcoming-timeline { position: relative; padding-left: 4px; }
-      .upcoming-timeline-track { position: absolute; left: 26px; top: 22px; bottom: 22px; width: 4px; border-radius: 4px; background: linear-gradient(180deg, #B6F09C, #7ED957, #3F8F1F); }
-      .upcoming-timeline-row { display: flex; gap: 14px; margin-bottom: 26px; position: relative; }
+      .upcoming-timeline-track { position: absolute; left: 32px; top: 0; bottom: 0; width: 10px; border-radius: 5px; background: linear-gradient(180deg, #B6F09C, #7ED957, #3F8F1F); }
+      .upcoming-timeline-row { display: flex; gap: 14px; margin-bottom: 28px; position: relative; }
       .upcoming-timeline-row:last-child { margin-bottom: 0; }
-      .upcoming-timeline-badge-col { width: 52px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
-      .upcoming-timeline-day { width: 44px; height: 44px; border-radius: 50%; background: #7ED957; color: #173404; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 13px; box-shadow: 0 0 0 4px var(--bg); position: relative; z-index: 1; flex-shrink: 0; }
-      .upcoming-timeline-unit { color: var(--text); font-size: 9px; font-weight: 700; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.04em; }
+      .upcoming-timeline-badge-col { width: 74px; flex-shrink: 0; display: flex; flex-direction: column; align-items: center; padding-top: 4px; }
+      .upcoming-timeline-day { width: 68px; height: 68px; border-radius: 50%; background: #7ED957; color: #173404; display: flex; flex-direction: column; align-items: center; justify-content: center; box-shadow: 0 0 0 4px var(--bg); position: relative; z-index: 1; flex-shrink: 0; }
+      .upcoming-timeline-day-n { font-weight: 700; font-size: 19px; line-height: 1; }
+      .upcoming-timeline-day-u { font-size: 9px; font-weight: 700; letter-spacing: 0.03em; margin-top: 2px; text-transform: uppercase; }
       .upcoming-timeline-content { display: flex; gap: 10px; flex: 1; text-align: left; background: none; border: none; padding: 4px 0 0; min-width: 0; }
       .upcoming-timeline-poster { width: 52px; height: 72px; border-radius: 8px; overflow: hidden; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); flex-shrink: 0; }
       .upcoming-timeline-poster img { width: 100%; height: 100%; object-fit: cover; }
