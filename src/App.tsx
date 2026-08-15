@@ -1588,10 +1588,14 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     if (!zappingOn) return;
     setZapLoading(true);
     setZapItems(null);
-    setZapPage(1);
-    zapSeenPagesRef.current = new Set([1]);
+    // A random starting page each time Zapping opens — otherwise exiting and
+    // re-entering always showed the exact same deck, since it was hardcoded to
+    // page 1 every time.
+    const startPage = 1 + Math.floor(Math.random() * 20);
+    setZapPage(startPage);
+    zapSeenPagesRef.current = new Set([startPage]);
     const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
-    fetchPopular(zapType, 1)
+    fetchPopular(zapType, startPage)
       .then(raw => mergeAnimeWithinTrendingBatch(raw))
       .then(setZapItems)
       .catch(() => setZapItems([]))
