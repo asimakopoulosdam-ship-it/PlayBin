@@ -3,7 +3,7 @@ import {
   Tv2, Clapperboard, Sparkles, LayoutList, Search, CircleUserRound,
   Plus, X, Star, Clock3, CheckCircle2, PlayCircle, ArrowLeft, Trash2,
   ListChecks, Ticket, Flame, Loader2, Pencil, Check, PlayCircle as PlayIcon,
-  CalendarDays, Film
+  CalendarDays, Film, Settings as SettingsIcon
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -34,6 +34,7 @@ const EMOJI_SETS = {
 const ITEMS_KEY = 'wl-items-v1';
 const PROFILE_KEY = 'wl-profile-v1';
 const SEARCH_HISTORY_KEY = 'wl-search-history-v1';
+const BW_MODE_KEY = 'wl-bw-mode-v1';
 
 // Paste your own free TMDB API key here (themoviedb.org → Settings → API).
 // This is a client-side app, so this key will be visible in the shipped code —
@@ -1949,12 +1950,94 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   );
 }
 
-/* ---------------------------------- Account ---------------------------------- */
+function ToggleSwitch({ on, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: 44, height: 26, borderRadius: 100, position: 'relative',
+        background: on ? '#7ED957' : 'var(--surface2)',
+        border: '1px solid var(--border)', flexShrink: 0,
+      }}
+    >
+      <span style={{
+        position: 'absolute', top: 2, left: on ? 20 : 2,
+        width: 20, height: 20, borderRadius: '50%', background: '#fff',
+        transition: 'left 0.15s ease',
+      }} />
+    </button>
+  );
+}
 
-function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, session, onSignIn, onSignOut }) {
+function SettingsSheet({ onClose, bwMode, onToggleBwMode, session, onExport, onImportClick, importMsg }) {
+  useBodyScrollLock();
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="chip" style={{ '--c': '#7ED957' }}>Settings</span>
+          <button className="icon-x" onClick={onClose}><X size={18} /></button>
+        </div>
+
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: '#4FA8FF' }} />
+          <div className="im-card-label">Help</div>
+          <p className="im-description">Need a hand with something? Send us a message and we'll get back to you.</p>
+          <a
+            className="report-bug-link"
+            style={{ marginTop: 10 }}
+            href={`mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent('Playbin Help')}`}
+          >
+            <Flame size={14} /> Contact support
+          </a>
+        </div>
+
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: '#8892B0' }} />
+          <div className="im-card-label">Appearance</div>
+          <div className="im-inline-row" style={{ borderTop: 'none', marginTop: 0, paddingTop: 0 }}>
+            <span className="im-inline-label" style={{ margin: 0 }}>Black &amp; white mode</span>
+            <ToggleSwitch on={bwMode} onClick={onToggleBwMode} />
+          </div>
+          <p className="dim" style={{ marginTop: 10 }}>Menus and navigation turn grayscale — posters and cover art stay in color.</p>
+        </div>
+
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: '#7ED957' }} />
+          <div className="im-card-label">Account status</div>
+          {session ? (
+            <div className="cloud-status" style={{ marginBottom: 0 }}>
+              <CheckCircle2 size={15} />
+              <span>Connected as {session.user.email}</span>
+            </div>
+          ) : (
+            <p className="dim">Not connected to Google — your library lives on this device only.</p>
+          )}
+        </div>
+
+        <div className="im-card">
+          <div className="im-card-accent" style={{ background: '#F5A623' }} />
+          <div className="im-card-label">Backup</div>
+          <div className="backup-row" style={{ marginTop: 0 }}>
+            <button className="backup-btn" onClick={onExport}>
+              <Ticket size={14} /> Export backup
+            </button>
+            <button className="backup-btn" onClick={onImportClick}>
+              <ListChecks size={14} /> Import backup
+            </button>
+          </div>
+          {importMsg && <p className="dim" style={{ textAlign: 'center', marginTop: 8 }}>{importMsg}</p>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, session, onSignIn, onSignOut, bwMode, onToggleBwMode }) {
   const [editing, setEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(profileName || '');
   const [importMsg, setImportMsg] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   useEffect(() => { setNameDraft(profileName || ''); }, [profileName]);
@@ -2010,7 +2093,11 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
 
   return (
     <div className="screen">
-      <h1 className="page-title" style={{ '--c': '#7ED957' }}>Account</h1>
+      <div className="account-title-row">
+        <h1 className="page-title" style={{ '--c': '#7ED957', margin: 0 }}>Account</h1>
+        <button className="settings-gear-btn" onClick={() => setSettingsOpen(true)}><SettingsIcon size={19} /></button>
+      </div>
+      <div style={{ height: 16 }} />
 
       {session ? (
         <div className="cloud-status">
@@ -2092,16 +2179,7 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
         </div>
       )}
 
-      <div className="backup-row">
-        <button className="backup-btn" onClick={exportBackup}>
-          <Ticket size={14} /> Export backup
-        </button>
-        <button className="backup-btn" onClick={() => fileInputRef.current && fileInputRef.current.click()}>
-          <ListChecks size={14} /> Import backup
-        </button>
-        <input ref={fileInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={handleImportFile} />
-      </div>
-      {importMsg && <p className="dim" style={{ textAlign: 'center', marginTop: 8 }}>{importMsg}</p>}
+      <input ref={fileInputRef} type="file" accept="application/json" style={{ display: 'none' }} onChange={handleImportFile} />
 
       <a
         className="report-bug-link"
@@ -2109,6 +2187,18 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
       >
         <Flame size={14} /> Report a bug
       </a>
+
+      {settingsOpen && (
+        <SettingsSheet
+          onClose={() => setSettingsOpen(false)}
+          bwMode={bwMode}
+          onToggleBwMode={onToggleBwMode}
+          session={session}
+          onExport={exportBackup}
+          onImportClick={() => fileInputRef.current && fileInputRef.current.click()}
+          importMsg={importMsg}
+        />
+      )}
     </div>
   );
 }
@@ -2579,6 +2669,15 @@ export default function App() {
   const [presetSeason, setPresetSeason] = useState(null);
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [bwMode, setBwMode] = useState(false);
+  useEffect(() => { setBwMode(storageGet(BW_MODE_KEY, false)); }, []);
+  const toggleBwMode = () => {
+    setBwMode(v => {
+      const next = !v;
+      storageSet(BW_MODE_KEY, next);
+      return next;
+    });
+  };
   const [maintenance, setMaintenance] = useState(null); // null = still checking, or {message} when on
 
   // Checked once on load — flip app_config.maintenance_mode in Supabase any time to
@@ -2846,7 +2945,7 @@ export default function App() {
   }
 
   return (
-    <div className="mw-root">
+    <div className={`mw-root ${bwMode ? 'bw-mode' : ''}`}>
       <GlobalStyle />
       <div className="view-area">
         {view === 'discover' && (
@@ -2883,6 +2982,8 @@ export default function App() {
             session={session}
             onSignIn={signInWithGoogle}
             onSignOut={signOutCloud}
+            bwMode={bwMode}
+            onToggleBwMode={toggleBwMode}
           />
         )}
       </div>
@@ -2944,6 +3045,37 @@ function GlobalStyle() {
       button { font-family: inherit; cursor: pointer; border: none; background: none; color: inherit; }
       input, textarea { font-family: inherit; color: var(--text); }
       @media (prefers-reduced-motion: reduce) { .mw-root * { animation: none !important; transition: none !important; } }
+
+      /* ---------- Black & white mode ---------- */
+      /* Menus, nav, and page chrome go grayscale; posters and library cards (which
+         sit lower in the tree, alongside — not inside — this chrome) keep their
+         real colors. Background switches to solid black instead of the usual navy. */
+      .bw-mode { background: #000 !important; background-image: none !important; }
+      .bw-mode .bottom-nav,
+      .bw-mode .tabs-row,
+      .bw-mode .discover-top,
+      .bw-mode .page-title,
+      .bw-mode .account-title-row,
+      .bw-mode .search-box,
+      .bw-mode .sort-row,
+      .bw-mode .backup-row,
+      .bw-mode .type-tiles,
+      .bw-mode .upcoming-row,
+      .bw-mode .profile-card,
+      .bw-mode .time-card,
+      .bw-mode .type-breakdown,
+      .bw-mode .modal-head,
+      .bw-mode .history-chips,
+      .bw-mode .history-head,
+      .bw-mode .group-title,
+      .bw-mode .myshows-list-head,
+      .bw-mode .cloud-status,
+      .bw-mode .google-signin-btn,
+      .bw-mode .report-bug-link,
+      .bw-mode .splash-mid,
+      .bw-mode .settings-gear-btn {
+        filter: grayscale(1);
+      }
 
       /* ---------- Splash ---------- */
       .splash { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; animation: splash-fade 1.5s ease forwards; cursor: pointer; }
@@ -3128,6 +3260,9 @@ function GlobalStyle() {
       .time-chip-u { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
       .time-total { margin-top: 12px; font-size: 11.5px; color: var(--muted); font-family: 'JetBrains Mono'; }
       .backup-row { display: flex; gap: 10px; margin-top: 28px; }
+      .account-title-row { display: flex; align-items: center; justify-content: space-between; }
+      .settings-gear-btn { width: 36px; height: 36px; border-radius: 10px; background: var(--surface); border: 1px solid var(--border); color: var(--muted); display: flex; align-items: center; justify-content: center; }
+      .settings-gear-btn:active { color: #7ED957; border-color: #7ED957; }
       .backup-btn { flex: 1; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); color: var(--text); font-size: 12.5px; font-weight: 600; }
       .report-bug-link { display: flex; align-items: center; justify-content: center; gap: 7px; margin-top: 14px; padding: 12px; border-radius: 12px; border: 1px dashed var(--border); color: var(--muted); font-size: 12.5px; font-weight: 600; text-decoration: none; }
       .report-bug-link:active { background: var(--surface); }
