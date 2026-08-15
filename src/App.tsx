@@ -1461,9 +1461,38 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
   const [upcomingQuery, setUpcomingQuery] = useState('');
   const debounceRef = useRef(null);
 
+  // Trending is a combined, interleaved movie/series/anime list — this collapses
+  // multi-season anime within THAT batch the same way search results already do,
+  // then rebuilds the list in its original order with the merged entries in place.
+  const mergeAnimeWithinTrendingBatch = async (batch) => {
+    const animeItems = batch.filter(r => r.type === 'anime');
+    if (animeItems.length <= 1) return batch;
+    let mergedAnime = animeItems;
+    try { mergedAnime = await mergeAnimeSeasonEntries(animeItems); } catch (e) { return batch; }
+    const mergedById = new Map(mergedAnime.map(a => [a.externalId, a]));
+    const seen = new Set();
+    return batch
+      .map(item => {
+        if (item.type !== 'anime') return item;
+        if (mergedById.has(item.externalId) && !seen.has(item.externalId)) {
+          seen.add(item.externalId);
+          return mergedById.get(item.externalId);
+        }
+        return null; // absorbed into another season's merged entry — drop it
+      })
+      .filter(Boolean);
+  };
+
   useEffect(() => { loadSearchHistory().then(setHistory); }, []);
   useEffect(() => {
-    fetchTrendingAll(1).then(setTrending).catch(() => setTrending([])).finally(() => setTrendingLoading(false));
+    (async () => {
+      setTrendingLoading(true);
+      try {
+        const raw = await fetchTrendingAll(1);
+        setTrending(await mergeAnimeWithinTrendingBatch(raw));
+      } catch (e) { setTrending([]); }
+      setTrendingLoading(false);
+    })();
   }, []);
   useEffect(() => {
     if (discoverTab === 'upcoming' && upcomingGlobal === null && !loadingUpcomingGlobal) {
@@ -1479,9 +1508,10 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     setLoadingMoreTrending(true);
     const nextPage = trendingPage + 1;
     try {
-      const more = await fetchTrendingAll(nextPage);
+      let more = await fetchTrendingAll(nextPage);
       if (more.length === 0) setTrendingExhausted(true);
       else {
+        more = await mergeAnimeWithinTrendingBatch(more);
         setTrending(prev => {
           const existingIds = new Set((prev || []).map(r => r.externalId));
           const deduped = more.filter(r => !existingIds.has(r.externalId));
