@@ -40,7 +40,6 @@ const APPEARANCE_MODES = [
   { key: 'dark', label: 'Dark mode' },
   { key: 'white', label: 'White mode' },
   { key: 'neon', label: 'Neon' },
-  { key: 'neon-black', label: 'Neon (black bg)' },
 ];
 
 // Paste your own free TMDB API key here (themoviedb.org → Settings → API).
@@ -1438,6 +1437,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
   const [trendingExhausted, setTrendingExhausted] = useState(false);
   const [upcomingGlobal, setUpcomingGlobal] = useState(null);
   const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
+  const [upcomingQuery, setUpcomingQuery] = useState('');
   const debounceRef = useRef(null);
 
   useEffect(() => { loadSearchHistory().then(setHistory); }, []);
@@ -1662,17 +1662,30 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
 
       {discoverTab === 'upcoming' && (
         <div className="group" style={{ marginTop: 4 }}>
+          <div className="search-box" style={{ marginBottom: 16 }}>
+            <Search size={16} />
+            <input
+              placeholder="Search upcoming titles…"
+              value={upcomingQuery}
+              onChange={e => setUpcomingQuery(e.target.value)}
+            />
+          </div>
           {loadingUpcomingGlobal && <p className="dim" style={{ padding: '10px 2px' }}>Loading upcoming titles…</p>}
           {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length === 0 && (
             <EmptyState text="Couldn't load upcoming titles right now." cta="Try again in a moment" />
           )}
-          {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length > 0 && (
-            <div className="item-list">
-              {upcomingGlobal.map(r => (
-                <UpcomingResultRow key={r.externalId} result={r} onOpen={openResult} />
-              ))}
-            </div>
-          )}
+          {!loadingUpcomingGlobal && upcomingGlobal && upcomingGlobal.length > 0 && (() => {
+            const q = upcomingQuery.trim().toLowerCase();
+            const filtered = q ? upcomingGlobal.filter(r => r.title.toLowerCase().includes(q)) : upcomingGlobal;
+            if (filtered.length === 0) return <p className="dim" style={{ padding: '10px 2px' }}>No upcoming titles match "{upcomingQuery}".</p>;
+            return (
+              <div className="item-list">
+                {filtered.map(r => (
+                  <UpcomingResultRow key={r.externalId} result={r} onOpen={openResult} />
+                ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -3110,27 +3123,22 @@ function GlobalStyle() {
         filter: grayscale(1);
       }
 
-      /* Neon: colors pushed brighter/more saturated. The filter is applied per-card
-         (not to the whole growing app container) on purpose — mobile Safari/Chrome
-         fail to repaint NEW content appended inside an already-filtered, dynamically
-         growing container (e.g. loading more via "Show more") until the page is
-         scrolled. Applying filter to each individually-mounted card instead avoids
-         that bug entirely, since every new card paints fresh with its own filter. */
-      .mode-neon-black {
+      /* Neon: colors pushed brighter/more saturated on a pure black canvas. The
+         filter is applied per-card (not to the whole growing app container) on
+         purpose — mobile Safari/Chrome fail to repaint NEW content appended inside
+         an already-filtered, dynamically growing container (e.g. loading more via
+         "Show more") until the page is scrolled. Applying filter to each
+         individually-mounted card instead avoids that bug entirely, since every new
+         card paints fresh with its own filter. */
+      .mode-neon {
         background: #000 !important; background-image: none !important;
         --surface: #000; --surface2: #0A0A0A; --border: #222;
       }
       .mode-dark .bottom-nav,
-      .mode-neon-black .bottom-nav {
+      .mode-neon .bottom-nav {
         background: linear-gradient(180deg, rgba(0,0,0,0.85), rgba(0,0,0,0.98)) !important;
       }
       .mode-neon :is(.result-row, .item-row, .upcoming-item-row, .im-card, .modal,
-        .season-row, .ep-row, .history-chip, .tab-btn, .type-tile, .bottom-nav,
-        .search-box, .discover-top, .time-card, .profile-card, .type-breakdown,
-        .cloud-status, .google-signin-btn, .report-bug-link, .splash-mid, .type-stat,
-        .time-chip, .backup-btn, .settings-gear-btn, .appearance-mode-btn, .seg-btn,
-        .choice-btn, .save-btn, .add-btn, .sort-btn, .history-head),
-      .mode-neon-black :is(.result-row, .item-row, .upcoming-item-row, .im-card, .modal,
         .season-row, .ep-row, .history-chip, .tab-btn, .type-tile, .bottom-nav,
         .search-box, .discover-top, .time-card, .profile-card, .type-breakdown,
         .cloud-status, .google-signin-btn, .report-bug-link, .splash-mid, .type-stat,
