@@ -1627,7 +1627,9 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
       const key = franchiseGroupKeyForTitle(item.title);
       if (!key) return item;
       try {
-        const query = item.title.split(':')[0].replace(/\s+season\s*\d+$/i, '').trim();
+        // Strips a trailing season marker so the search finds the base franchise —
+        // handles both "Title Season 4" and Kitsu's bare "Title 4" styles.
+        const query = item.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
         const searchResults = await searchAnimeDB(query);
         const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
         return fullMatch || item;
