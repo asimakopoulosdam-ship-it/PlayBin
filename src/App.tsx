@@ -3,7 +3,7 @@ import {
   Tv2, Clapperboard, Sparkles, LayoutList, Search, CircleUserRound,
   Plus, X, Star, Clock3, CheckCircle2, PlayCircle, ArrowLeft, Trash2,
   ListChecks, Ticket, Flame, Loader2, Pencil, Check, PlayCircle as PlayIcon,
-  CalendarDays, Film, Settings as SettingsIcon, ChevronDown
+  CalendarDays, Film, Settings as SettingsIcon, ChevronDown, Zap, Heart
 } from 'lucide-react';
 import { createClient } from '@supabase/supabase-js';
 
@@ -274,6 +274,15 @@ async function fetchSeriesDetail(tmdbId) {
 // Supports paging so Discover can keep loading more as you scroll down.
 async function fetchTrendingAll(page = 1) {
   const res = await fetch(`/api/trending?page=${page}`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.results || [];
+}
+
+// "Zapping" — overall popular titles (not this week's trending), type-scoped to
+// whatever filter tab is active, or a mix of all three when no filter is applied.
+async function fetchPopular(type = 'mix', page = 1) {
+  const res = await fetch(`/api/popular?type=${type}&page=${page}`);
   if (!res.ok) return [];
   const data = await res.json();
   return data.results || [];
@@ -1278,6 +1287,110 @@ function ResultRow({ result, inLibrary, libraryItemId, onOpen, onQuickAdd, onRem
   );
 }
 
+// "Zapping" — a Tinder-style swipe deck over popular titles. Swipe (or tap the
+// heart/X buttons) right to add "Want to watch", left to skip and move on.
+function ZapCardContent({ result, onOpen }) {
+  const meta = TYPE_META[result.type];
+  const Icon = meta.icon;
+  return (
+    <div className="zap-card-inner" onClick={onOpen}>
+      <div className="zap-card-poster">
+        {result.posterUrl ? <img src={result.posterUrl} alt="" /> : <Icon size={40} />}
+      </div>
+      <div className="zap-card-info">
+        <span className="chip" style={{ '--c': meta.color }}>{meta.singular}</span>
+        <div className="zap-card-title">{result.title}</div>
+        <div className="zap-card-meta">
+          {result.year || ''}
+          <ExternalStars value={result.ratingValue} source={result.ratingSource} size={12} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SwipeDeck({ items, onQuickAdd, onOpen, onNeedMore }) {
+  const [index, setIndex] = useState(0);
+  const [dragX, setDragX] = useState(0);
+  const dragging = useRef(false);
+  const startX = useRef(null);
+  const [exitDir, setExitDir] = useState(null);
+
+  const current = items[index];
+  const upNext = items[index + 1];
+
+  useEffect(() => {
+    if (items.length > 0 && index >= items.length - 3 && onNeedMore) onNeedMore();
+  }, [index, items.length]);
+
+  const onPointerDown = (e) => {
+    dragging.current = true;
+    startX.current = (e.touches ? e.touches[0].clientX : e.clientX);
+  };
+  const onPointerMove = (e) => {
+    if (!dragging.current || startX.current == null) return;
+    const clientX = (e.touches ? e.touches[0].clientX : e.clientX);
+    setDragX(clientX - startX.current);
+  };
+  const finishSwipe = (dir) => {
+    setExitDir(dir);
+    if (dir === 'right' && current) onQuickAdd(current, 'planned');
+    setTimeout(() => {
+      setIndex(i => i + 1);
+      setDragX(0);
+      setExitDir(null);
+    }, 200);
+  };
+  const onPointerUp = () => {
+    if (!dragging.current) return;
+    dragging.current = false;
+    if (dragX > 100) finishSwipe('right');
+    else if (dragX < -100) finishSwipe('left');
+    else setDragX(0);
+    startX.current = null;
+  };
+
+  if (!current) {
+    return (
+      <div className="zap-empty">
+        <Zap size={26} />
+        <p className="dim">That's everyone for now — check back later for more.</p>
+      </div>
+    );
+  }
+
+  const rotate = dragX / 18;
+  const cardStyle = exitDir
+    ? { transform: `translateX(${exitDir === 'right' ? 600 : -600}px) rotate(${exitDir === 'right' ? 30 : -30}deg)`, transition: 'transform 0.2s ease', opacity: 0 }
+    : { transform: `translateX(${dragX}px) rotate(${rotate}deg)`, transition: dragging.current ? 'none' : 'transform 0.2s ease' };
+
+  return (
+    <div className="zap-deck">
+      <div className="zap-stack">
+        {upNext && (
+          <div className="zap-card zap-card-behind">
+            <ZapCardContent result={upNext} />
+          </div>
+        )}
+        <div
+          className="zap-card"
+          style={cardStyle}
+          onTouchStart={onPointerDown} onTouchMove={onPointerMove} onTouchEnd={onPointerUp}
+          onMouseDown={onPointerDown} onMouseMove={e => dragging.current && onPointerMove(e)} onMouseUp={onPointerUp} onMouseLeave={onPointerUp}
+        >
+          <ZapCardContent result={current} onOpen={() => onOpen(current)} />
+          {dragX > 40 && <div className="zap-stamp zap-stamp-like">WANT TO WATCH</div>}
+          {dragX < -40 && <div className="zap-stamp zap-stamp-skip">SKIP</div>}
+        </div>
+      </div>
+      <div className="zap-actions">
+        <button className="zap-action-btn zap-skip" onClick={() => finishSwipe('left')}><X size={22} /></button>
+        <button className="zap-action-btn zap-like" onClick={() => finishSwipe('right')}><Heart size={20} /></button>
+      </div>
+    </div>
+  );
+}
+
 function ResultSection({ title, color, results, items, onOpen, onQuickAdd, onRemoveFromLibrary }) {
   if (!results || results.length === 0) return null;
   return (
@@ -1457,6 +1570,23 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
   const [trendingPage, setTrendingPage] = useState(1);
   const [loadingMoreTrending, setLoadingMoreTrending] = useState(false);
   const [trendingExhausted, setTrendingExhausted] = useState(false);
+  const [zappingOn, setZappingOn] = useState(false);
+  const [zapItems, setZapItems] = useState(null);
+  const [zapLoading, setZapLoading] = useState(false);
+  const [zapLoadingMore, setZapLoadingMore] = useState(false);
+  const [zapPage, setZapPage] = useState(1);
+
+  // Re-fetch the popular deck whenever Zapping turns on, or the type filter changes
+  // while it's already on — Movies tab zaps popular movies, Anime tab zaps popular
+  // anime, "all" zaps a mix of everything, same as the rest of Discover.
+  useEffect(() => {
+    if (!zappingOn) return;
+    setZapLoading(true);
+    setZapItems(null);
+    setZapPage(1);
+    const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
+    fetchPopular(zapType, 1).then(setZapItems).catch(() => setZapItems([])).finally(() => setZapLoading(false));
+  }, [zappingOn, typeFilter]);
   const [upcomingGlobal, setUpcomingGlobal] = useState(null);
   const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
   const [upcomingQuery, setUpcomingQuery] = useState('');
@@ -1653,8 +1783,36 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
 
       {!query.trim() && (
         <div className="group" style={{ marginTop: 18 }}>
-          <div className="group-title" style={{ color: '#7ED957' }}>Trending now</div>
-          {trendingLoading ? (
+          <div className="zap-header-row">
+            <div className="group-title" style={{ color: '#7ED957', margin: 0 }}>Trending now</div>
+            <button className={`zap-toggle-btn ${zappingOn ? 'active' : ''}`} onClick={() => setZappingOn(z => !z)}>
+              <Zap size={13} /> {zappingOn ? 'Exit Zapping' : 'Zapping'}
+            </button>
+          </div>
+          {zappingOn ? (
+            zapLoading && !zapItems ? (
+              <p className="dim" style={{ padding: '4px 2px' }}>Loading…</p>
+            ) : (
+              <SwipeDeck
+                items={zapItems || []}
+                onQuickAdd={onQuickAdd}
+                onOpen={openResult}
+                onNeedMore={() => {
+                  if (zapLoadingMore) return;
+                  setZapLoadingMore(true);
+                  const nextPage = zapPage + 1;
+                  const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
+                  fetchPopular(zapType, nextPage).then(more => {
+                    if (more.length > 0) {
+                      setZapItems(prev => [...(prev || []), ...more]);
+                      setZapPage(nextPage);
+                    }
+                  }).finally(() => setZapLoadingMore(false));
+                }}
+              />
+            )
+          ) : (
+          trendingLoading ? (
             <p className="dim" style={{ padding: '4px 2px' }}>Loading…</p>
           ) : trending && trending.filter(r => typeFilter === 'all' || r.type === typeFilter).length > 0 ? (
             <>
@@ -1683,6 +1841,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
             </>
           ) : (
             <p className="dim" style={{ padding: '4px 2px' }}>Couldn't load trending titles right now.</p>
+          )
           )}
         </div>
       )}
@@ -3312,6 +3471,30 @@ function GlobalStyle() {
       .tab-btn.active { background: color-mix(in srgb, #7ED957 20%, var(--surface)); color: #7ED957; border-color: color-mix(in srgb, #7ED957 55%, transparent); }
       .show-more-btn { display: flex; align-items: center; justify-content: center; width: 100%; margin-top: 12px; padding: 11px; border-radius: 12px; background: var(--surface); border: 1px solid var(--border); color: #7ED957; font-weight: 700; font-size: 13.5px; }
       .show-more-btn:disabled { opacity: 0.6; }
+      .zap-header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+      .zap-toggle-btn { display: flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 100px; background: var(--surface); border: 1px solid var(--border); color: var(--muted); font-size: 11.5px; font-weight: 700; }
+      .zap-toggle-btn.active { background: color-mix(in srgb, #7ED957 20%, var(--surface)); color: #7ED957; border-color: #7ED957; }
+      .zap-deck { display: flex; flex-direction: column; align-items: center; padding: 8px 0 4px; }
+      .zap-stack { position: relative; width: 100%; max-width: 300px; height: 400px; }
+      .zap-card { position: absolute; inset: 0; border-radius: 20px; overflow: hidden; background: var(--surface); border: 1px solid var(--border); box-shadow: 0 20px 50px -20px rgba(0,0,0,0.6); cursor: grab; touch-action: pan-y; user-select: none; }
+      .zap-card-behind { transform: scale(0.94) translateY(10px); opacity: 0.6; z-index: 0; }
+      .zap-card:not(.zap-card-behind) { z-index: 1; }
+      .zap-card-inner { display: flex; flex-direction: column; height: 100%; }
+      .zap-card-poster { flex: 1; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); overflow: hidden; }
+      .zap-card-poster img { width: 100%; height: 100%; object-fit: cover; }
+      .zap-card-info { padding: 14px 16px 18px; background: linear-gradient(0deg, rgba(11,14,26,0.95), rgba(11,14,26,0.5)); }
+      .zap-card-title { font-family: 'Fraunces', serif; font-style: italic; font-weight: 700; font-size: 19px; color: var(--text); margin: 8px 0 6px; line-height: 1.2; }
+      .zap-card-meta { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; }
+      .zap-stamp { position: absolute; top: 26px; padding: 8px 14px; border: 3px solid; border-radius: 10px; font-weight: 800; font-size: 15px; letter-spacing: 0.04em; transform: rotate(-14deg); z-index: 2; }
+      .zap-stamp-like { right: 18px; color: #7ED957; border-color: #7ED957; transform: rotate(-14deg); }
+      .zap-stamp-skip { left: 18px; color: #FF6B6B; border-color: #FF6B6B; transform: rotate(14deg); }
+      .zap-actions { display: flex; gap: 22px; margin-top: 20px; }
+      .zap-action-btn { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); }
+      .zap-action-btn.zap-skip { color: #FF6B6B; }
+      .zap-action-btn.zap-skip:active { background: color-mix(in srgb, #FF6B6B 18%, var(--surface)); border-color: #FF6B6B; }
+      .zap-action-btn.zap-like { color: #7ED957; }
+      .zap-action-btn.zap-like:active { background: color-mix(in srgb, #7ED957 18%, var(--surface)); border-color: #7ED957; }
+      .zap-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 50px 20px; color: var(--muted); text-align: center; }
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
       .upcoming-timeline { position: relative; padding-left: 4px; }
