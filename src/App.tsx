@@ -1332,9 +1332,9 @@ function SwipeDeck({ items, onQuickAdd, onOpen, onNeedMore }) {
     const clientX = (e.touches ? e.touches[0].clientX : e.clientX);
     setDragX(clientX - startX.current);
   };
-  const finishSwipe = (dir) => {
+  const finishSwipe = (dir, status) => {
     setExitDir(dir);
-    if (dir === 'right' && current) onQuickAdd(current, 'planned');
+    if (dir !== 'left' && current) onQuickAdd(current, status || 'planned');
     setTimeout(() => {
       setIndex(i => i + 1);
       setDragX(0);
@@ -1385,7 +1385,8 @@ function SwipeDeck({ items, onQuickAdd, onOpen, onNeedMore }) {
       </div>
       <div className="zap-actions">
         <button className="zap-action-btn zap-skip" onClick={() => finishSwipe('left')}><X size={22} /></button>
-        <button className="zap-action-btn zap-like" onClick={() => finishSwipe('right')}><Heart size={20} /></button>
+        <button className="zap-action-btn zap-plan" onClick={() => finishSwipe('right', 'planned')}><Heart size={19} /></button>
+        <button className="zap-action-btn zap-watched" onClick={() => finishSwipe('right', 'completed')}><CheckCircle2 size={19} /></button>
       </div>
     </div>
   );
@@ -1585,7 +1586,11 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     setZapItems(null);
     setZapPage(1);
     const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
-    fetchPopular(zapType, 1).then(setZapItems).catch(() => setZapItems([])).finally(() => setZapLoading(false));
+    fetchPopular(zapType, 1)
+      .then(raw => mergeAnimeWithinTrendingBatch(raw))
+      .then(setZapItems)
+      .catch(() => setZapItems([]))
+      .finally(() => setZapLoading(false));
   }, [zappingOn, typeFilter]);
   const [upcomingGlobal, setUpcomingGlobal] = useState(null);
   const [loadingUpcomingGlobal, setLoadingUpcomingGlobal] = useState(false);
@@ -1802,8 +1807,9 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
                   setZapLoadingMore(true);
                   const nextPage = zapPage + 1;
                   const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
-                  fetchPopular(zapType, nextPage).then(more => {
+                  fetchPopular(zapType, nextPage).then(async more => {
                     if (more.length > 0) {
+                      more = await mergeAnimeWithinTrendingBatch(more);
                       setZapItems(prev => [...(prev || []), ...more]);
                       setZapPage(nextPage);
                     }
@@ -3488,12 +3494,14 @@ function GlobalStyle() {
       .zap-stamp { position: absolute; top: 26px; padding: 8px 14px; border: 3px solid; border-radius: 10px; font-weight: 800; font-size: 15px; letter-spacing: 0.04em; transform: rotate(-14deg); z-index: 2; }
       .zap-stamp-like { right: 18px; color: #7ED957; border-color: #7ED957; transform: rotate(-14deg); }
       .zap-stamp-skip { left: 18px; color: #FF6B6B; border-color: #FF6B6B; transform: rotate(14deg); }
-      .zap-actions { display: flex; gap: 22px; margin-top: 20px; }
+      .zap-actions { display: flex; gap: 16px; margin-top: 20px; }
       .zap-action-btn { width: 56px; height: 56px; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: var(--surface); border: 1px solid var(--border); }
       .zap-action-btn.zap-skip { color: #FF6B6B; }
       .zap-action-btn.zap-skip:active { background: color-mix(in srgb, #FF6B6B 18%, var(--surface)); border-color: #FF6B6B; }
-      .zap-action-btn.zap-like { color: #7ED957; }
-      .zap-action-btn.zap-like:active { background: color-mix(in srgb, #7ED957 18%, var(--surface)); border-color: #7ED957; }
+      .zap-action-btn.zap-plan { color: #F5A623; }
+      .zap-action-btn.zap-plan:active { background: color-mix(in srgb, #F5A623 18%, var(--surface)); border-color: #F5A623; }
+      .zap-action-btn.zap-watched { color: #7ED957; }
+      .zap-action-btn.zap-watched:active { background: color-mix(in srgb, #7ED957 18%, var(--surface)); border-color: #7ED957; }
       .zap-empty { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 50px 20px; color: var(--muted); text-align: center; }
       .upcoming-item-poster { width: 48px; height: 68px; border-radius: 9px; overflow: hidden; flex-shrink: 0; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); }
       .upcoming-item-poster img { width: 100%; height: 100%; object-fit: cover; }
