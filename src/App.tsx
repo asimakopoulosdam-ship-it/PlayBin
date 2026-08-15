@@ -34,7 +34,13 @@ const EMOJI_SETS = {
 const ITEMS_KEY = 'wl-items-v1';
 const PROFILE_KEY = 'wl-profile-v1';
 const SEARCH_HISTORY_KEY = 'wl-search-history-v1';
-const BW_MODE_KEY = 'wl-bw-mode-v1';
+const APPEARANCE_MODE_KEY = 'wl-appearance-mode-v1';
+const APPEARANCE_MODES = [
+  { key: 'normal', label: 'Normal' },
+  { key: 'bw', label: 'Black & white' },
+  { key: 'neon', label: 'Neon' },
+  { key: 'neon-black', label: 'Neon (black bg)' },
+];
 
 // Paste your own free TMDB API key here (themoviedb.org → Settings → API).
 // This is a client-side app, so this key will be visible in the shipped code —
@@ -1950,26 +1956,7 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   );
 }
 
-function ToggleSwitch({ on, onClick }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        width: 44, height: 26, borderRadius: 100, position: 'relative',
-        background: on ? '#7ED957' : 'var(--surface2)',
-        border: '1px solid var(--border)', flexShrink: 0,
-      }}
-    >
-      <span style={{
-        position: 'absolute', top: 2, left: on ? 20 : 2,
-        width: 20, height: 20, borderRadius: '50%', background: '#fff',
-        transition: 'left 0.15s ease',
-      }} />
-    </button>
-  );
-}
-
-function SettingsSheet({ onClose, bwMode, onToggleBwMode, session, onExport, onImportClick, importMsg }) {
+function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, onExport, onImportClick, importMsg }) {
   useBodyScrollLock();
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -1995,11 +1982,21 @@ function SettingsSheet({ onClose, bwMode, onToggleBwMode, session, onExport, onI
         <div className="im-card">
           <div className="im-card-accent" style={{ background: '#8892B0' }} />
           <div className="im-card-label">Appearance</div>
-          <div className="im-inline-row" style={{ borderTop: 'none', marginTop: 0, paddingTop: 0 }}>
-            <span className="im-inline-label" style={{ margin: 0 }}>Black &amp; white mode</span>
-            <ToggleSwitch on={bwMode} onClick={onToggleBwMode} />
+          <div className="appearance-mode-list">
+            {APPEARANCE_MODES.map(m => (
+              <button
+                key={m.key}
+                className={`appearance-mode-btn ${appearanceMode === m.key ? 'active' : ''}`}
+                onClick={() => onSetAppearanceMode(m.key)}
+              >
+                <span className="seg-dot" style={{ background: appearanceMode === m.key ? '#7ED957' : 'var(--muted)', opacity: appearanceMode === m.key ? 1 : 0.4 }} />
+                {m.label}
+              </button>
+            ))}
           </div>
-          <p className="dim" style={{ marginTop: 10 }}>Menus and navigation turn grayscale — posters and cover art stay in color.</p>
+          <p className="dim" style={{ marginTop: 10 }}>
+            Black &amp; white keeps posters and cover art in color, everything else turns grayscale. Neon boosts saturation across the app.
+          </p>
         </div>
 
         <div className="im-card">
@@ -2033,7 +2030,7 @@ function SettingsSheet({ onClose, bwMode, onToggleBwMode, session, onExport, onI
   );
 }
 
-function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, session, onSignIn, onSignOut, bwMode, onToggleBwMode }) {
+function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, session, onSignIn, onSignOut, appearanceMode, onSetAppearanceMode }) {
   const [editing, setEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(profileName || '');
   const [importMsg, setImportMsg] = useState('');
@@ -2191,8 +2188,8 @@ function AccountScreen({ items, onOpen, profileName, onSaveName, onImport, sessi
       {settingsOpen && (
         <SettingsSheet
           onClose={() => setSettingsOpen(false)}
-          bwMode={bwMode}
-          onToggleBwMode={onToggleBwMode}
+          appearanceMode={appearanceMode}
+          onSetAppearanceMode={onSetAppearanceMode}
           session={session}
           onExport={exportBackup}
           onImportClick={() => fileInputRef.current && fileInputRef.current.click()}
@@ -2669,14 +2666,11 @@ export default function App() {
   const [presetSeason, setPresetSeason] = useState(null);
   const [session, setSession] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
-  const [bwMode, setBwMode] = useState(false);
-  useEffect(() => { setBwMode(storageGet(BW_MODE_KEY, false)); }, []);
-  const toggleBwMode = () => {
-    setBwMode(v => {
-      const next = !v;
-      storageSet(BW_MODE_KEY, next);
-      return next;
-    });
+  const [appearanceMode, setAppearanceModeState] = useState('normal');
+  useEffect(() => { setAppearanceModeState(storageGet(APPEARANCE_MODE_KEY, 'normal')); }, []);
+  const setAppearanceMode = (mode) => {
+    setAppearanceModeState(mode);
+    storageSet(APPEARANCE_MODE_KEY, mode);
   };
   const [maintenance, setMaintenance] = useState(null); // null = still checking, or {message} when on
 
@@ -2945,7 +2939,7 @@ export default function App() {
   }
 
   return (
-    <div className={`mw-root ${bwMode ? 'bw-mode' : ''}`}>
+    <div className={`mw-root ${appearanceMode !== 'normal' ? `mode-${appearanceMode}` : ''}`}>
       <GlobalStyle />
       <div className="view-area">
         {view === 'discover' && (
@@ -2982,8 +2976,8 @@ export default function App() {
             session={session}
             onSignIn={signInWithGoogle}
             onSignOut={signOutCloud}
-            bwMode={bwMode}
-            onToggleBwMode={toggleBwMode}
+            appearanceMode={appearanceMode}
+            onSetAppearanceMode={setAppearanceMode}
           />
         )}
       </div>
@@ -3046,36 +3040,60 @@ function GlobalStyle() {
       input, textarea { font-family: inherit; color: var(--text); }
       @media (prefers-reduced-motion: reduce) { .mw-root * { animation: none !important; transition: none !important; } }
 
-      /* ---------- Black & white mode ---------- */
-      /* Menus, nav, and page chrome go grayscale; posters and library cards (which
-         sit lower in the tree, alongside — not inside — this chrome) keep their
-         real colors. Background switches to solid black instead of the usual navy. */
-      .bw-mode { background: #000 !important; background-image: none !important; }
-      .bw-mode .bottom-nav,
-      .bw-mode .tabs-row,
-      .bw-mode .discover-top,
-      .bw-mode .page-title,
-      .bw-mode .account-title-row,
-      .bw-mode .search-box,
-      .bw-mode .sort-row,
-      .bw-mode .backup-row,
-      .bw-mode .type-tiles,
-      .bw-mode .upcoming-row,
-      .bw-mode .profile-card,
-      .bw-mode .time-card,
-      .bw-mode .type-breakdown,
-      .bw-mode .modal-head,
-      .bw-mode .history-chips,
-      .bw-mode .history-head,
-      .bw-mode .group-title,
-      .bw-mode .myshows-list-head,
-      .bw-mode .cloud-status,
-      .bw-mode .google-signin-btn,
-      .bw-mode .report-bug-link,
-      .bw-mode .splash-mid,
-      .bw-mode .settings-gear-btn {
+      /* ---------- Appearance modes ---------- */
+      .appearance-mode-list { display: flex; flex-direction: column; gap: 6px; }
+      .appearance-mode-btn { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-radius: 10px; background: var(--surface2); border: 1px solid var(--border); color: var(--muted); font-size: 13px; font-weight: 600; text-align: left; }
+      .appearance-mode-btn.active { color: #7ED957; border-color: #7ED957; background: color-mix(in srgb, #7ED957 12%, var(--surface2)); }
+
+      /* Black & white: menus/nav/chrome go grayscale and card backgrounds turn pure
+         black, but posters, cover art, and colored badges/chips (which sit beside —
+         not filtered by — this chrome) keep their real colors. */
+      .mode-bw { background: #000 !important; background-image: none !important; }
+      .mode-bw .bottom-nav,
+      .mode-bw .tabs-row,
+      .mode-bw .discover-top,
+      .mode-bw .page-title,
+      .mode-bw .account-title-row,
+      .mode-bw .search-box,
+      .mode-bw .sort-row,
+      .mode-bw .backup-row,
+      .mode-bw .type-tiles,
+      .mode-bw .upcoming-row,
+      .mode-bw .profile-card,
+      .mode-bw .time-card,
+      .mode-bw .type-breakdown,
+      .mode-bw .modal-head,
+      .mode-bw .history-chips,
+      .mode-bw .history-head,
+      .mode-bw .group-title,
+      .mode-bw .myshows-list-head,
+      .mode-bw .cloud-status,
+      .mode-bw .google-signin-btn,
+      .mode-bw .report-bug-link,
+      .mode-bw .splash-mid,
+      .mode-bw .settings-gear-btn {
         filter: grayscale(1);
       }
+      .mode-bw .result-row,
+      .mode-bw .item-row,
+      .mode-bw .upcoming-item-row,
+      .mode-bw .im-card,
+      .mode-bw .modal,
+      .mode-bw .season-row,
+      .mode-bw .ep-row,
+      .mode-bw .similar-card .similar-poster,
+      .mode-bw .history-chip {
+        background: #000 !important;
+        border-color: #222 !important;
+      }
+
+      /* Neon: same navy background as usual, colors pushed brighter/more saturated
+         across the whole app. */
+      .mode-neon { filter: saturate(1.9) contrast(1.08) brightness(1.04); }
+
+      /* Neon (black bg): same saturation boost, but on a pure black canvas instead
+         of the usual navy. */
+      .mode-neon-black { filter: saturate(1.9) contrast(1.08) brightness(1.04); background: #000 !important; background-image: none !important; }
 
       /* ---------- Splash ---------- */
       .splash { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px; animation: splash-fade 1.5s ease forwards; cursor: pointer; }
