@@ -13,8 +13,8 @@ const APP_NAME = 'Playbin';
 
 const TYPE_META = {
   series: { label: 'Series', singular: 'Series', color: '#4FA8FF', icon: Tv2, defaultMinutes: 45 },
-  movie:  { label: 'Movies', singular: 'Movie', color: '#FF8A5B', icon: Clapperboard, defaultMinutes: 110 },
-  anime:  { label: 'Anime', singular: 'Anime', color: '#E85D9E', icon: Sparkles, defaultMinutes: 24 },
+  movie:  { label: 'Movies', singular: 'Movie', color: '#E8A33D', icon: Clapperboard, defaultMinutes: 110 },
+  anime:  { label: 'Anime', singular: 'Anime', color: '#8B7FD6', icon: Sparkles, defaultMinutes: 24 },
 };
 
 const TYPE_ORDER = ['movie', 'series', 'anime'];
