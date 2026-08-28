@@ -1491,13 +1491,36 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd, onRem
 /* ---------------------------------- Cast strip + person filmography ---------------------------------- */
 
 function CastStrip({ cast, onOpenPerson }) {
+  const dragStartRef = useRef(null);
+  const draggedRef = useRef(false);
+
   if (!cast || cast.length === 0) return null;
+
+  // On desktop, dragging with the mouse to scroll this horizontal strip otherwise
+  // still fires a click when the pointer lifts — which opened whichever actor
+  // happened to be under the cursor, even though the person only meant to scroll.
+  // Tracking movement distance between mousedown and mouseup tells the two apart.
+  const handleMouseDown = (e) => {
+    dragStartRef.current = { x: e.clientX, y: e.clientY };
+    draggedRef.current = false;
+  };
+  const handleMouseMove = (e) => {
+    if (!dragStartRef.current) return;
+    const dx = Math.abs(e.clientX - dragStartRef.current.x);
+    const dy = Math.abs(e.clientY - dragStartRef.current.y);
+    if (dx > 6 || dy > 6) draggedRef.current = true;
+  };
+  const handleCardClick = (p) => {
+    if (draggedRef.current) { draggedRef.current = false; return; } // was a scroll, not a real click
+    onOpenPerson(p);
+  };
+
   return (
     <div className="im-similar-section">
       <div className="im-card-label" style={{ marginTop: 16 }}>Cast</div>
-      <div className="similar-scroll">
+      <div className="similar-scroll" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}>
         {cast.map(p => (
-          <div key={p.id} className="cast-card" onClick={() => onOpenPerson(p)}>
+          <div key={p.id} className="cast-card" onClick={() => handleCardClick(p)}>
             <div className="cast-avatar">
               {p.profileUrl ? <img src={p.profileUrl} alt="" /> : <CircleUserRound size={26} />}
             </div>
@@ -2702,6 +2725,19 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
     }
   }, [form.id]);
 
+  // Runtime for a real database movie is a fact, not a setting — always pull the
+  // actual figure from TMDB rather than trusting whatever got saved at add-time
+  // (which could've been the generic default if the detail hadn't loaded yet).
+  useEffect(() => {
+    if (isFromDb && form.type === 'movie' && dbId) {
+      let cancelled = false;
+      fetchMovieDetail(dbId).then(detail => {
+        if (!cancelled && detail.runtimeMinutes) setAndPersist('movieMinutes', detail.runtimeMinutes);
+      }).catch(() => {});
+      return () => { cancelled = true; };
+    }
+  }, [form.id]);
+
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const persistNow = (updated) => {
@@ -2828,10 +2864,14 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
           {!isEpisodic && (
             <div className="im-inline-row">
               <span className="im-inline-label" style={{ margin: 0 }}>Runtime</span>
-              <div className="im-runtime-input">
-                <input type="number" step="0.1" min="0" value={runtimeDraft} onChange={e => setHours(e.target.value)} />
-                <span>hrs</span>
-              </div>
+              {isFromDb ? (
+                <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 14 }}>{hoursValue} hrs</span>
+              ) : (
+                <div className="im-runtime-input">
+                  <input type="number" step="0.1" min="0" value={runtimeDraft} onChange={e => setHours(e.target.value)} />
+                  <span>hrs</span>
+                </div>
+              )}
             </div>
           )}
         </div>
