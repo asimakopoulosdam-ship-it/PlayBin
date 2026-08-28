@@ -2672,7 +2672,7 @@ function TimeChip({ n, u }) {
 
 /* ---------------------------------- Add / Edit modal ---------------------------------- */
 
-function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAdd, items }) {
+function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpisodes, onQuickAdd, items }) {
   useBodyScrollLock();
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
@@ -2740,9 +2740,12 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
 
   const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
+  // Background auto-saves (status tap, rating, notes blur, the runtime-correction
+  // fetch) must never close the sheet — only an explicit Save (brand-new item) or
+  // the Close button should ever dismiss it.
   const persistNow = (updated) => {
     const now = new Date().toISOString();
-    onSave({
+    onSilentSave({
       ...updated,
       title: updated.title.trim(),
       dateAdded: updated.dateAdded || now,
@@ -2777,9 +2780,18 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
   };
 
 
+  // Only this one — the brand-new-item "Save" button — should actually close the
+  // sheet, since it's the one genuinely "I'm done, add it" action.
   const save = () => {
     if (!form.title.trim()) return;
-    persistNow(form);
+    const now = new Date().toISOString();
+    onSave({
+      ...form,
+      title: form.title.trim(),
+      dateAdded: form.dateAdded || now,
+      dateWatched: (form.status === 'watching' || form.status === 'completed') ? (form.dateWatched || now) : form.dateWatched,
+      id: form.id || uid(),
+    });
   };
 
   const statusColor = STATUS_META[form.status].color;
@@ -3249,6 +3261,14 @@ export default function App() {
     persist(next);
     setModal(null);
   };
+  // Auto-saves (status tap, rating, notes blur, the background runtime-correction
+  // fetch) update storage the same way but must NOT dismiss the sheet — only an
+  // explicit Save (brand-new item) or Close should ever do that.
+  const silentlyUpdateItem = (item) => {
+    const exists = items.some(i => i.id === item.id);
+    const next = exists ? items.map(i => i.id === item.id ? item : i) : [...items, item];
+    persist(next);
+  };
   const deleteItem = (id) => { persist(items.filter(i => i.id !== id)); setModal(null); };
 
   // Toggling episodes writes straight to storage — no need to hit "Αποθήκευση" first.
@@ -3498,7 +3518,7 @@ export default function App() {
       <BottomNav view={view} onNav={handleNav} />
 
       {modal && (
-        <ItemModal draft={modal} onClose={() => setModal(null)} onSave={upsertItem} onDelete={deleteItem}
+        <ItemModal draft={modal} onClose={() => setModal(null)} onSave={upsertItem} onSilentSave={silentlyUpdateItem} onDelete={deleteItem}
           onOpenEpisodes={(item, season) => { setEpisodesItem(item); setPresetSeason(season || null); }}
           onQuickAdd={quickAddFromResult} items={items} />
       )}
