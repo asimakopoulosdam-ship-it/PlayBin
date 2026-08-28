@@ -78,17 +78,27 @@ function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toS
 // which is exactly the "can't scroll, or the wrong thing scrolls" feeling. Deliberately
 // simple (no position:fixed trick) — that approach is known to sometimes fight with
 // iOS Safari's handling of nested scrollable elements, which is worse than this.
+//
+// Uses a shared counter rather than "save the previous value, restore it on unmount" —
+// with nested modals (e.g. a detail sheet opening a Cast entry's filmography sheet on
+// top of it), the inner and outer sheets don't reliably unmount in the exact reverse
+// order they mounted, and a naive save/restore can leave the page permanently stuck
+// non-scrollable once the last modal closes. Counting active locks side-steps that:
+// scrolling only re-enables once every modal that asked for a lock has released it.
+let scrollLockCount = 0;
 function useBodyScrollLock() {
   useEffect(() => {
-    const body = document.body;
-    const html = document.documentElement;
-    const prevBody = body.style.overflow;
-    const prevHtml = html.style.overflow;
-    body.style.overflow = 'hidden';
-    html.style.overflow = 'hidden';
+    if (scrollLockCount === 0) {
+      document.body.style.overflow = 'hidden';
+      document.documentElement.style.overflow = 'hidden';
+    }
+    scrollLockCount++;
     return () => {
-      body.style.overflow = prevBody;
-      html.style.overflow = prevHtml;
+      scrollLockCount = Math.max(0, scrollLockCount - 1);
+      if (scrollLockCount === 0) {
+        document.body.style.overflow = '';
+        document.documentElement.style.overflow = '';
+      }
     };
   }, []);
 }
@@ -1155,7 +1165,7 @@ function ItemRow({ item, onClick, showType }) {
           {isEpisodic ? (
             <span className="dim">{watchedCount}{item.totalEpisodes ? `/${item.totalEpisodes}` : ''} ep</span>
           ) : (
-            <span className="dim">{item.movieMinutes || TYPE_META.movie.defaultMinutes}′</span>
+            <span className="dim">{((item.movieMinutes || TYPE_META.movie.defaultMinutes) / 60).toFixed(1)}h</span>
           )}
           {item.rating ? <span className="dim">★ {item.rating}/10</span> : null}
         </div>
@@ -2738,7 +2748,17 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
 
   const statusColor = STATUS_META[form.status].color;
   const hoursValue = ((Number(form.movieMinutes) || TYPE_META.movie.defaultMinutes) / 60).toFixed(1);
-  const setHours = (v) => setAndPersist('movieMinutes', Math.max(0, Math.round(parseFloat(v || 0) * 60)));
+  // Separate draft state for the runtime text box: typing "1." would otherwise get
+  // immediately re-derived and snapped back to "1.0" (since hoursValue is recomputed
+  // from movieMinutes on every render), which made it look like keystrokes weren't
+  // registering. The draft only resyncs when switching to a different item, not on
+  // every keystroke, so it can hold whatever the person is mid-typing.
+  const [runtimeDraft, setRuntimeDraft] = useState(hoursValue);
+  useEffect(() => { setRuntimeDraft(hoursValue); }, [form.id]);
+  const setHours = (v) => {
+    setRuntimeDraft(v);
+    setAndPersist('movieMinutes', Math.max(0, Math.round((parseFloat(v) || 0) * 60)));
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -2809,7 +2829,7 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
             <div className="im-inline-row">
               <span className="im-inline-label" style={{ margin: 0 }}>Runtime</span>
               <div className="im-runtime-input">
-                <input type="number" step="0.1" min="0" value={hoursValue} onChange={e => setHours(e.target.value)} />
+                <input type="number" step="0.1" min="0" value={runtimeDraft} onChange={e => setHours(e.target.value)} />
                 <span>hrs</span>
               </div>
             </div>
