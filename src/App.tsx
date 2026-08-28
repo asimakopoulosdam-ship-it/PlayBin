@@ -763,6 +763,28 @@ function franchiseGroupKeyForTitle(title) {
   return group ? group.key : null;
 }
 
+// Trending/Zapping keep re-encountering the same handful of popular franchises
+// (MHA, AoT, etc.) across different pages and swipe sessions. Without this, every
+// single encounter re-ran a full background search to resolve the merged season
+// group, even though the answer never changes within a session. Cached by franchise
+// key so it's shared across Trending AND Zapping, not just one or the other.
+const franchiseEnrichmentCache = new Map(); // franchise key -> Promise<mergedItem|null>
+async function resolveFranchiseEnrichment(key, item) {
+  if (franchiseEnrichmentCache.has(key)) return franchiseEnrichmentCache.get(key);
+  const promise = (async () => {
+    try {
+      // Strips a trailing season marker so the search finds the base franchise —
+      // handles both "Title Season 4" and Kitsu's bare "Title 4" styles.
+      const query = item.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
+      const searchResults = await searchAnimeDB(query);
+      const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
+      return fullMatch || null;
+    } catch (e) { return null; }
+  })();
+  franchiseEnrichmentCache.set(key, promise);
+  return promise;
+}
+
 const animeMergeChainCache = new Map(); // malId (string) -> Promise<string[]>
 
 async function fetchAnimeMergeChainIds(malId) {
@@ -1391,7 +1413,7 @@ function SwipeDeck({ items, onQuickAdd, onOpen, onNeedMore }) {
   const upNext = items[index + 1];
 
   useEffect(() => {
-    if (items.length > 0 && index >= items.length - 3 && onNeedMore) onNeedMore();
+    if (items.length > 0 && index >= items.length - 5 && onNeedMore) onNeedMore();
   }, [index, items.length]);
 
   const onPointerDown = (e) => {
@@ -1810,14 +1832,8 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
       if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) return item; // already merged
       const key = franchiseGroupKeyForTitle(item.title);
       if (!key) return item;
-      try {
-        // Strips a trailing season marker so the search finds the base franchise —
-        // handles both "Title Season 4" and Kitsu's bare "Title 4" styles.
-        const query = item.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
-        const searchResults = await searchAnimeDB(query);
-        const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
-        return fullMatch || item;
-      } catch (e) { return item; }
+      const fullMatch = await resolveFranchiseEnrichment(key, item);
+      return fullMatch || item;
     }));
 
     const mergedById = new Map(mergedAnime.map(a => [a.externalId, a]));
