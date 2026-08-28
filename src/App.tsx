@@ -288,6 +288,61 @@ async function fetchPopular(type = 'mix', page = 1) {
   return data.results || [];
 }
 
+// Cast — top-billed actors for a movie/series, sorted by TMDB's own popularity
+// metric (famous first). Used for the "Cast" strip above "You might also like".
+async function fetchCast(tmdbId, type) {
+  const path = type === 'movie' ? 'movie' : 'tv';
+  try {
+    const res = await fetch(`https://api.themoviedb.org/3/${path}/${tmdbId}/credits?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    return (data.cast || [])
+      .filter(p => p.profile_path || p.popularity > 1)
+      .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+      .slice(0, 20)
+      .map(p => ({
+        id: p.id, name: p.name, character: p.character || '',
+        profileUrl: p.profile_path ? `${TMDB_IMG}${p.profile_path}` : null,
+        popularity: p.popularity || 0,
+      }));
+  } catch (e) { return []; }
+}
+
+// A person's other credits — used when tapping an actor in the Cast strip. Combines
+// movie + TV credits, sorted by popularity, deduped, mapped into the normal result
+// shape so the existing detail sheet / add-to-library flow works on them unchanged.
+async function fetchPersonFilmography(personId) {
+  try {
+    const res = await fetch(`https://api.themoviedb.org/3/person/${personId}/combined_credits?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const cast = (data.cast || []).filter(c => c.media_type === 'movie' || c.media_type === 'tv');
+    const seen = new Set();
+    return cast
+      .filter(c => {
+        const key = `${c.media_type}-${c.id}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((a, b) => (b.popularity || 0) - (a.popularity || 0))
+      .slice(0, 20)
+      .map(c => {
+        const isMovie = c.media_type === 'movie';
+        return {
+          type: isMovie ? 'movie' : 'series',
+          externalId: isMovie ? `tmdb-${c.id}` : `tmdbtv-${c.id}`,
+          tmdbId: c.id,
+          title: isMovie ? c.title : c.name,
+          year: (isMovie ? c.release_date : c.first_air_date) ? (isMovie ? c.release_date : c.first_air_date).slice(0, 4) : null,
+          posterUrl: c.poster_path ? `${TMDB_IMG}${c.poster_path}` : null,
+          summary: c.overview || '',
+          ratingValue: c.vote_average || null, ratingSource: 'TMDB', popularityScore: c.popularity || 0,
+          episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null, needsDetail: true,
+        };
+      });
+  } catch (e) { return []; }
+}
 
 // "You might also like" — same idea across sources, mapped into the same shape as
 // search results so the existing add-to-library flow works on them unchanged.
@@ -331,12 +386,18 @@ async function fetchSimilarTitles(item) {
       const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}/recommendations`);
       if (!res.ok) return [];
       const data = await res.json();
-      return (data.data || []).slice(0, 8).map(r => ({
+      const raw = (data.data || []).slice(0, 8).map(r => ({
         type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
         posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
         year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
         episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
       }));
+      // Recommendations never went through the merge pass search results get, so a
+      // recommended "Kuroko no Basket 3rd Season" showed up as its own separate card
+      // instead of folding into the one merged Kuroko entry. Same fix as Trending/
+      // Zapping: collapse known franchises within this list too.
+      if (raw.length <= 1) return raw;
+      try { return await mergeAnimeSeasonEntries(raw); } catch (e) { return raw; }
     }
   } catch (e) { return []; }
   return [];
@@ -1417,6 +1478,76 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd, onRem
   );
 }
 
+/* ---------------------------------- Cast strip + person filmography ---------------------------------- */
+
+function CastStrip({ cast, onOpenPerson }) {
+  if (!cast || cast.length === 0) return null;
+  return (
+    <div className="im-similar-section">
+      <div className="im-card-label" style={{ marginTop: 16 }}>Cast</div>
+      <div className="similar-scroll">
+        {cast.map(p => (
+          <div key={p.id} className="cast-card" onClick={() => onOpenPerson(p)}>
+            <div className="cast-avatar">
+              {p.profileUrl ? <img src={p.profileUrl} alt="" /> : <CircleUserRound size={26} />}
+            </div>
+            <div className="cast-name">{p.name}</div>
+            {p.character && <div className="cast-character">{p.character}</div>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
+  useBodyScrollLock();
+  const [credits, setCredits] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchPersonFilmography(person.id).then(r => { if (!cancelled) setCredits(r); }).catch(() => { if (!cancelled) setCredits([]); });
+    return () => { cancelled = true; };
+  }, [person.id]);
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-head">
+          <span className="chip" style={{ '--c': '#4FA8FF' }}>Actor</span>
+          <button className="icon-x" onClick={onClose}><X size={18} /></button>
+        </div>
+        <div className="locked-title-row">
+          <div className="cast-avatar" style={{ width: 52, height: 52 }}>
+            {person.profileUrl ? <img src={person.profileUrl} alt="" /> : <CircleUserRound size={30} />}
+          </div>
+          <div className="locked-title-text">{person.name}</div>
+        </div>
+
+        {credits === null && <p className="dim" style={{ padding: '10px 2px' }}>Loading filmography…</p>}
+        {credits && credits.length === 0 && <p className="dim" style={{ padding: '10px 2px' }}>Nothing found for this person.</p>}
+        {credits && credits.length > 0 && (
+          <div className="result-list">
+            {credits.map(r => {
+              const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
+              return (
+                <ResultRow
+                  key={r.externalId}
+                  result={r}
+                  inLibrary={!!matched}
+                  libraryItemId={matched ? matched.id : null}
+                  onOpen={onOpenResult}
+                  onQuickAdd={() => {}}
+                />
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* ---------------------------------- Result detail sheet ---------------------------------- */
 
 function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQuickAdd, onOpenResult }) {
@@ -1428,6 +1559,8 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
   const [loadingSeasons, setLoadingSeasons] = useState(false);
   const [similar, setSimilar] = useState(null);
   const [addedSimilar, setAddedSimilar] = useState(() => new Set());
+  const [cast, setCast] = useState(null);
+  const [activePerson, setActivePerson] = useState(null);
   const meta = TYPE_META[result.type];
   const existingItem = items.find(i => i.externalId === result.externalId && i.type === result.type);
   const already = !!existingItem;
@@ -1448,6 +1581,11 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
         .catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
     }
     fetchSimilarTitles(result).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
+    // Cast only makes sense for movies/series — anime credits on TMDB are usually
+    // sparse/voice-only and not what people mean by "cast" here.
+    if ((result.type === 'movie' || result.type === 'series') && result.tmdbId) {
+      fetchCast(result.tmdbId, result.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+    }
     return () => { cancelled = true; };
   }, [result]);
 
@@ -1519,6 +1657,10 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
           </>
         )}
 
+        {(result.type === 'movie' || result.type === 'series') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
+        )}
+
         {similar && similar.length > 0 && (
           <div className="im-similar-section">
             <div className="im-card-label" style={{ marginTop: 16 }}>You might also like</div>
@@ -1543,6 +1685,15 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
               })}
             </div>
           </div>
+        )}
+
+        {activePerson && (
+          <PersonFilmographySheet
+            person={activePerson}
+            onClose={() => setActivePerson(null)}
+            items={items}
+            onOpenResult={(r) => { setActivePerson(null); onOpenResult(r); }}
+          />
         )}
       </div>
     </div>
@@ -2516,12 +2667,17 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
   const [loadingSeasons, setLoadingSeasons] = useState(false);
   const [similar, setSimilar] = useState(null);
   const [addedSimilar, setAddedSimilar] = useState(() => new Set());
+  const [cast, setCast] = useState(null);
+  const [activePerson, setActivePerson] = useState(null);
   const watchedSet = new Set(form.watchedEpisodeIds || []);
 
   useEffect(() => {
     if (isFromDb) {
       let cancelled = false;
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
+      if ((form.type === 'movie' || form.type === 'series') && dbId) {
+        fetchCast(dbId, form.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+      }
       return () => { cancelled = true; };
     }
   }, [form.id]);
@@ -2723,6 +2879,10 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
           )}
         </div>
 
+        {isFromDb && (form.type === 'movie' || form.type === 'series') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
+        )}
+
         {isFromDb && similar && similar.length > 0 && (
           <div className="im-similar-section">
             <div className="im-card-label" style={{ marginTop: 4 }}>You might also like</div>
@@ -2759,6 +2919,15 @@ function ItemModal({ draft, onClose, onSave, onDelete, onOpenEpisodes, onQuickAd
             onOpenEpisodes={onOpenEpisodes}
             onQuickAdd={onQuickAdd}
             onOpenResult={openSimilarResult}
+          />
+        )}
+
+        {activePerson && (
+          <PersonFilmographySheet
+            person={activePerson}
+            onClose={() => setActivePerson(null)}
+            items={items || []}
+            onOpenResult={(r) => { setActivePerson(null); openSimilarResult(r); }}
           />
         )}
       </div>
@@ -3503,6 +3672,13 @@ function GlobalStyle() {
       .detail-note { font-size: 11.5px; color: #7ED957; font-weight: 600; }
       .detail-summary { font-size: 13px; line-height: 1.55; color: var(--muted); margin: 0 0 6px; }
       .trailer-btn { display: flex; align-items: center; gap: 6px; padding: 12px 16px; border-radius: 12px; background: var(--surface2); border: 1px solid var(--border); font-weight: 600; font-size: 13.5px; white-space: nowrap; }
+
+      /* ---------- Cast ---------- */
+      .cast-card { flex-shrink: 0; width: 76px; text-align: center; cursor: pointer; }
+      .cast-avatar { width: 60px; height: 60px; border-radius: 50%; overflow: hidden; background: var(--surface2); display: flex; align-items: center; justify-content: center; color: var(--muted); margin: 0 auto; border: 1px solid var(--border); }
+      .cast-avatar img { width: 100%; height: 100%; object-fit: cover; }
+      .cast-name { font-size: 11px; font-weight: 700; margin-top: 6px; line-height: 1.25; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+      .cast-character { font-size: 10px; color: var(--muted); margin-top: 2px; display: -webkit-box; -webkit-line-clamp: 1; -webkit-box-orient: vertical; overflow: hidden; }
 
       /* ---------- My Shows ---------- */
       .tabs-row { display: flex; gap: 8px; margin-bottom: 16px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 2px; }
