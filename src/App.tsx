@@ -658,6 +658,7 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'demon-slayer', pattern: /^(demon slayer|kimetsu no yaiba)\b/i },
   { key: 'jjk', pattern: /^jujutsu kaisen\b/i },
   { key: 'fairy-tail', pattern: /^fairy tail\b/i },
+  { key: 'jojo', pattern: /^(jojo'?s bizarre adventure|jojo no kimyou na bouken)\b/i },
   { key: 'black-clover', pattern: /^black clover\b/i },
   { key: 'haikyuu', pattern: /^haiky[uū]+/i },
   { key: 'sao', pattern: /^sword art online\b/i },
@@ -4016,4 +4017,3 @@ function GlobalStyle() {
       }
     `}</style>
   );
-}
