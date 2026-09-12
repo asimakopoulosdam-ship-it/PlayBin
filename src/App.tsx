@@ -86,13 +86,19 @@ function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toS
 // non-scrollable once the last modal closes. Counting active locks side-steps that:
 // scrolling only re-enables once every modal that asked for a lock has released it.
 let scrollLockCount = 0;
-function useBodyScrollLock() {
+function useBodyScrollLock(scrollRef) {
   useEffect(() => {
     if (scrollLockCount === 0) {
       document.body.style.overflow = 'hidden';
       document.documentElement.style.overflow = 'hidden';
     }
     scrollLockCount++;
+    // Every newly-opened window should start at its own top, never inheriting a
+    // scroll position left over from whatever was showing a moment ago (e.g.
+    // opening an actor's filmography sheet while scrolled to the bottom of a
+    // movie's "You might also like" section shouldn't carry that scroll position
+    // into the new sheet).
+    if (scrollRef && scrollRef.current) scrollRef.current.scrollTop = 0;
     return () => {
       scrollLockCount = Math.max(0, scrollLockCount - 1);
       if (scrollLockCount === 0) {
@@ -660,7 +666,7 @@ const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'fairy-tail', pattern: /^fairy tail\b/i },
   { key: 'jojo', pattern: /^(jojo'?s bizarre adventure|jojo no kimyou na bouken)\b/i },
   { key: 'black-clover', pattern: /^black clover\b/i },
-  { key: 'haikyuu', pattern: /^haiky[uū]+/i },
+  { key: 'haikyuu', pattern: /^haiky[uū]{1,2}(!|\b)/i },
   { key: 'sao', pattern: /^sword art online\b/i },
   { key: 'fire-force', pattern: /^(fire force|enen no shouboutai)\b/i },
   { key: 'promised-neverland', pattern: /^(the )?(promised neverland|yakusoku no neverland)\b/i },
@@ -1557,7 +1563,8 @@ function CastStrip({ cast, onOpenPerson }) {
 }
 
 function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   const [credits, setCredits] = useState(null);
 
   useEffect(() => {
@@ -1567,7 +1574,7 @@ function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
   }, [person.id]);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="chip" style={{ '--c': '#4FA8FF' }}>Actor</span>
@@ -1607,7 +1614,8 @@ function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
 /* ---------------------------------- Result detail sheet ---------------------------------- */
 
 function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQuickAdd, onOpenResult }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   const [detail, setDetail] = useState(result);
   const [loadingMore, setLoadingMore] = useState(!!result.needsDetail);
   const [imgError, setImgError] = useState(false);
@@ -1646,7 +1654,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
   }, [result]);
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal detail-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="chip" style={{ '--c': meta.color }}>{meta.singular}</span>
@@ -2193,7 +2201,8 @@ function sortItems(list, sortBy) {
 // Search scoped to one type, used from My Shows' "+" — only real, verified titles from
 // the database can be added here; nothing freeform or unconfirmed.
 function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onDelete }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   const meta = TYPE_META[type];
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
@@ -2230,7 +2239,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="chip" style={{ '--c': meta.color }}>{meta.singular}</span>
@@ -2443,9 +2452,10 @@ function AccordionSection({ title, accentColor, defaultOpen, children }) {
 }
 
 function SettingsSheet({ onClose, appearanceMode, onSetAppearanceMode, session, onExport, onImportClick, importMsg }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <span className="chip" style={{ '--c': '#7ED957' }}>Settings</span>
@@ -2690,7 +2700,8 @@ function TimeChip({ n, u }) {
 /* ---------------------------------- Add / Edit modal ---------------------------------- */
 
 function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpisodes, onQuickAdd, items }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
   const isEpisodic = form.type !== 'movie';
@@ -2826,7 +2837,7 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal item-modal-v2" style={{ '--c': meta.color }} onClick={e => e.stopPropagation()}>
         <div className="im-glow" style={{ background: `radial-gradient(circle, color-mix(in srgb, ${meta.color} 35%, transparent), transparent 70%)` }} />
         <div className="modal-head">
@@ -3064,7 +3075,8 @@ function SeasonRow({ season, watchedSet, onOpen }) {
 }
 
 function EpisodesSheet({ item, initialSeason, onClose, onToggle, onToggleMany, onEditInfo }) {
-  useBodyScrollLock();
+  const backdropRef = useRef(null);
+  useBodyScrollLock(backdropRef);
   const [seasons, setSeasons] = useState(null);
   const [loading, setLoading] = useState(!initialSeason);
   const [error, setError] = useState('');
@@ -3102,7 +3114,7 @@ function EpisodesSheet({ item, initialSeason, onClose, onToggle, onToggleMany, o
   };
 
   return (
-    <div className="modal-backdrop" onClick={onClose}>
+    <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal detail-modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
           <button className="icon-x" onClick={() => (activeSeason && !cameWithPreset ? setActiveSeason(null) : onClose())}>
