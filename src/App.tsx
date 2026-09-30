@@ -695,7 +695,10 @@ async function checkOneUpcoming(it) {
   return null;
 }
 
-async function fetchUpcomingForItems(candidates) {
+// onProgress, if given, is called with the accumulated results so far after the
+// movie/series batch and after each anime batch — so the screen can show what's
+// already known immediately instead of one long wait for absolutely everything.
+async function fetchUpcomingForItems(candidates, onProgress) {
   // Movies/series hit TMDB, a different API with no shared rate limit concern here
   // — those stay fully parallel. Anime candidates can each trigger a Kitsu/AniList
   // lookup plus a Jikan fetch; firing several of those at once for a library with
@@ -703,20 +706,22 @@ async function fetchUpcomingForItems(candidates) {
   // dropping results, so those go through in small sequential batches instead.
   const tmdbCandidates = candidates.filter(it => it.type === 'movie' || it.type === 'series');
   const animeCandidates = candidates.filter(it => it.type === 'anime');
+  const pluck = settled => settled.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value);
 
   const tmdbSettled = await Promise.allSettled(tmdbCandidates.map(checkOneUpcoming));
+  let accumulated = pluck(tmdbSettled);
+  if (onProgress) onProgress([...accumulated].sort((a, b) => a.days - b.days));
 
-  const animeSettled = [];
   const BATCH_SIZE = 2;
   for (let i = 0; i < animeCandidates.length; i += BATCH_SIZE) {
     const batch = animeCandidates.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.allSettled(batch.map(checkOneUpcoming));
-    animeSettled.push(...batchResults);
+    accumulated = [...accumulated, ...pluck(batchResults)];
+    if (onProgress) onProgress([...accumulated].sort((a, b) => a.days - b.days));
     if (i + BATCH_SIZE < animeCandidates.length) await new Promise(r => setTimeout(r, 500));
   }
 
-  const settled = [...tmdbSettled, ...animeSettled];
-  return settled.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value).sort((a, b) => a.days - b.days);
+  return accumulated.sort((a, b) => a.days - b.days);
 }
 
 // Series: TMDB gives real season numbers; one call per season (in parallel) for the episode list.
@@ -2632,6 +2637,11 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   const [upcomingOpen, setUpcomingOpen] = useState(false);
   const [upcomingList, setUpcomingList] = useState(null);
   const [loadingUpcoming, setLoadingUpcoming] = useState(false);
+  // Bumped on every openUpcoming call; a result only gets applied if it's still
+  // the latest request. Without this, closing and reopening Upcoming while a slow
+  // anime check was still running could let that stale check's result land AFTER
+  // a newer, faster one — making an item flicker in and then disappear.
+  const upcomingRequestIdRef = useRef(0);
   const meta = TYPE_META[activeType];
   const allOfType = items.filter(i => i.type === activeType);
   // Not-yet-released titles stay out of Planned/Watching/Watched entirely — they
@@ -2646,6 +2656,8 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   const openUpcoming = async () => {
     setUpcomingOpen(true);
     setLoadingUpcoming(true);
+    setUpcomingList(null);
+    const requestId = ++upcomingRequestIdRef.current;
     // 'completed' is included too: marking a currently-airing anime "Watched" once
     // you're caught up on everything available doesn't mean the show itself is
     // over — it can still get new episodes. For movies/finished series this check
@@ -2653,10 +2665,19 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
     // test), so it's harmless to include them here as well.
     const candidates = items.filter(i => i.status === 'watching' || i.status === 'planned' || i.status === 'completed');
     try {
-      const list = await fetchUpcomingForItems(candidates);
-      setUpcomingList(list);
-    } catch (e) { setUpcomingList([]); }
-    setLoadingUpcoming(false);
+      const list = await fetchUpcomingForItems(candidates, (partial) => {
+        // Movie/series results (fast) show right away; anime results trickle in
+        // batch by batch after, instead of one long wait for everything at once.
+        if (requestId === upcomingRequestIdRef.current) {
+          setUpcomingList(partial);
+          setLoadingUpcoming(false);
+        }
+      });
+      if (requestId === upcomingRequestIdRef.current) setUpcomingList(list);
+    } catch (e) {
+      if (requestId === upcomingRequestIdRef.current) setUpcomingList([]);
+    }
+    if (requestId === upcomingRequestIdRef.current) setLoadingUpcoming(false);
   };
 
   return (
