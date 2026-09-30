@@ -386,6 +386,33 @@ async function fetchAnimeVoiceCast(malId) {
   } catch (e) { return []; }
 }
 
+// Anime doesn't have a per-episode air-date endpoint the way TMDB does for series
+// (next_episode_to_air) — the weekly broadcast day is the best signal Jikan gives.
+// This turns that into the same "Next episode: <date>" note series already show,
+// computed the same way the Upcoming tab does it, so an anime's own detail view
+// isn't left with just a raw "Airing: Sundays" text while series get a real date.
+async function fetchAnimeAiringNote(malId) {
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.data;
+    if (!a) return null;
+    if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
+      return `Premieres: ${formatDateGr(a.aired.from)}`;
+    }
+    if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
+      const days = daysUntilWeekday(a.broadcast.day);
+      if (days == null) return null;
+      const d = new Date();
+      d.setDate(d.getDate() + days);
+      return `Next episode: ${formatDateGr(d.toISOString().slice(0, 10))}`;
+    }
+    if (a.status === 'Finished Airing') return 'This anime has finished airing';
+    return null;
+  } catch (e) { return null; }
+}
+
 // A person's other credits — used when tapping an actor in the Cast strip. Combines
 // movie + TV credits, sorted by popularity, deduped, mapped into the normal result
 // shape so the existing detail sheet / add-to-library flow works on them unchanged.
@@ -1826,6 +1853,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
   const meta = TYPE_META[result.type];
   const existingItem = items.find(i => i.externalId === result.externalId && i.type === result.type);
   const already = !!existingItem;
+  const notYetReleased = !!(detail.releaseDate && new Date(detail.releaseDate) > new Date());
   const watchedSet = new Set((existingItem && existingItem.watchedEpisodeIds) || []);
   const dbId = (result.externalId || '').split('-').slice(1).join('-');
 
@@ -1848,12 +1876,16 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
     } else if (result.type === 'anime' && result.externalId) {
       // Genuinely Jikan-sourced entries already have the right id; anything else
       // (Kitsu/AniList) gets looked up by title first, since MAL is the only source
-      // with voice cast data at all.
-      (result.externalId.startsWith('jikan-')
+      // with voice cast and broadcast-day data at all. Resolved once, then reused
+      // for both the voice cast and the computed "Next episode" note below.
+      const jikanIdPromise = result.externalId.startsWith('jikan-')
         ? Promise.resolve(result.externalId.replace('jikan-', ''))
-        : resolveJikanIdForTitle(result.title, result.year)
-      ).then(malId => malId ? fetchAnimeVoiceCast(malId) : [])
-        .then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+        : resolveJikanIdForTitle(result.title, result.year);
+      jikanIdPromise.then(malId => {
+        if (!malId) return;
+        fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+        fetchAnimeAiringNote(malId).then(note => { if (!cancelled && note) setDetail(d => ({ ...d, extraNote: note })); }).catch(() => {});
+      });
     }
     return () => { cancelled = true; };
   }, [result]);
@@ -1899,6 +1931,12 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
         </div>
         {already ? (
           <div className="already-note"><Check size={15} /> Already in your list</div>
+        ) : notYetReleased ? (
+          <div className="choice-row">
+            <button className="choice-btn" style={{ '--c': meta.color, flex: 1 }} onClick={() => onAdd(detail, 'planned')}>
+              <ListChecks size={16} /> Want to watch
+            </button>
+          </div>
         ) : (
           <div className="choice-row">
             <button className="choice-btn watched" onClick={() => onAdd(detail, 'completed')}>
