@@ -52,7 +52,8 @@ function formatDateISOish(dateStr) {
 
 // Retries once after a short pause — smooths over one-off network/rate-limit blips
 // from the upstream source (this is exactly the kind of thing that made "Bleach"
-// briefly fail earlier).
+// briefly fail earlier). Used for TMDB (movie/series), which has no fallback source,
+// so it's worth a couple of retries to ride out a transient blip.
 async function fetchWithRetry(url, retries = 2, delayMs = 900) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -64,6 +65,17 @@ async function fetchWithRetry(url, retries = 2, delayMs = 900) {
     }
     await new Promise(r => setTimeout(r, delayMs));
   }
+}
+
+// Anime sources form a fallback CHAIN (Jikan -> Kitsu -> AniList) — unlike TMDB,
+// there's always a next source to try. Retrying the SAME struggling source for
+// ~1.8s before even attempting the next one (the old 2-retry/900ms default) made
+// every anime search painfully slow whenever Jikan was degraded, which happens
+// often. One quick retry with a short delay still absorbs a one-off blip, but
+// failing fast matters far more here than it does for TMDB — the fallback source
+// is usually healthy and ready to answer immediately.
+async function fetchAnimeSourceFast(url) {
+  return fetchWithRetry(url, 1, 300);
 }
 
 async function searchMovieLive(q, tmdbKey) {
@@ -105,7 +117,7 @@ async function searchSeriesLive(q, tmdbKey) {
 }
 
 async function searchAnimeJikan(q) {
-  const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(q)}&limit=15&sfw=true`);
+  const res = await fetchAnimeSourceFast(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(q)}&limit=15&sfw=true`);
   if (!res.ok) throw new Error('jikan search failed');
   const data = await res.json();
   const list = data.data || [];
@@ -129,7 +141,7 @@ async function searchAnimeJikan(q) {
 // keeps actual episode titles working instead of jumping straight to generic
 // "Episode 1, 2, 3..." placeholders.
 async function searchAnimeKitsu(q) {
-  const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(q)}&page[limit]=15`);
+  const res = await fetchAnimeSourceFast(`https://kitsu.io/api/edge/anime?filter[text]=${encodeURIComponent(q)}&page[limit]=15`);
   if (!res.ok) throw new Error('kitsu search failed');
   const data = await res.json();
   const list = data.data || [];
@@ -158,7 +170,8 @@ async function searchAnimeKitsu(q) {
 
 // AniList — last resort. Reliable uptime, but its episode-level data is limited
 // (crowd-sourced streaming links, not a real episode guide), so it's only used when
-// both Jikan and Kitsu can't answer.
+// both Jikan and Kitsu can't answer. No retry here — it's the last stop in the
+// chain, and a plain single attempt is already the fast path.
 async function searchAnimeAniListFallback(q) {
   const query = `query ($search: String) { Page(page: 1, perPage: 15) { media(search: $search, type: ANIME) { id title { romaji english native } format status episodes duration averageScore popularity description(asHtml: false) coverImage { large } startDate { year } trailer { id site } } } }`;
   const realRes = await fetch('https://graphql.anilist.co', {
