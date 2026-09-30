@@ -319,8 +319,36 @@ async function fetchCast(tmdbId, type) {
       .map(p => ({
         id: p.id, name: p.name, character: p.character || '',
         profileUrl: p.profile_path ? `${TMDB_IMG}${p.profile_path}` : null,
-        popularity: p.popularity || 0,
+        popularity: p.popularity || 0, source: 'tmdb',
       }));
+  } catch (e) { return []; }
+}
+
+// Voice cast for anime — Jikan's characters endpoint, not TMDB (TMDB's anime credits
+// are sparse and usually don't list voice actors at all). Only works for genuinely
+// Jikan-sourced entries (see fetchSeasonsFor and similar for why — Kitsu/AniList ids
+// aren't the same numbering). Defaults to the Japanese cast, since that's an anime's
+// original voice cast and the one people usually mean by "who voices this".
+async function fetchAnimeVoiceCast(malId) {
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}/characters`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const list = data.data || [];
+    const mainFirst = [...list].sort((a, b) => (a.role === 'Main' ? 0 : 1) - (b.role === 'Main' ? 0 : 1));
+    const mapped = [];
+    for (const entry of mainFirst) {
+      const va = (entry.voice_actors || []).find(v => v.language === 'Japanese');
+      if (!va || !va.person) continue;
+      mapped.push({
+        id: va.person.mal_id, name: va.person.name,
+        character: entry.character ? entry.character.name : '',
+        profileUrl: (va.person.images && va.person.images.jpg && va.person.images.jpg.image_url) || null,
+        source: 'jikan',
+      });
+      if (mapped.length >= 20) break;
+    }
+    return mapped;
   } catch (e) { return []; }
 }
 
@@ -357,6 +385,30 @@ async function fetchPersonFilmography(personId) {
           episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null, needsDetail: true,
         };
       });
+  } catch (e) { return []; }
+}
+
+// A voice actor's other anime roles — Jikan's own endpoint for this (TMDB's person
+// data doesn't know about MAL people at all, different id space entirely). Mapped
+// into the normal anime result shape so the existing detail sheet / add-to-library
+// flow works on these the same as any other anime result.
+async function fetchVoiceActorRoles(personId) {
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/people/${personId}/voices`);
+    if (!res.ok) return [];
+    const data = await res.json();
+    const list = data.data || [];
+    const seen = new Set();
+    return list
+      .filter(entry => entry.anime && !seen.has(entry.anime.mal_id) && seen.add(entry.anime.mal_id))
+      .slice(0, 20)
+      .map(entry => ({
+        type: 'anime', externalId: `jikan-${entry.anime.mal_id}`,
+        title: entry.anime.title,
+        posterUrl: (entry.anime.images && entry.anime.images.jpg && entry.anime.images.jpg.image_url) || null,
+        year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
+        episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
+      }));
   } catch (e) { return []; }
 }
 
@@ -1613,7 +1665,7 @@ function ResultSection({ title, color, results, items, onOpen, onQuickAdd, onRem
 
 /* ---------------------------------- Cast strip + person filmography ---------------------------------- */
 
-function CastStrip({ cast, onOpenPerson }) {
+function CastStrip({ cast, onOpenPerson, title = 'Cast' }) {
   const dragStartRef = useRef(null);
   const draggedRef = useRef(false);
 
@@ -1640,7 +1692,7 @@ function CastStrip({ cast, onOpenPerson }) {
 
   return (
     <div className="im-similar-section">
-      <div className="im-card-label" style={{ marginTop: 16 }}>Cast</div>
+      <div className="im-card-label" style={{ marginTop: 16 }}>{title}</div>
       <div className="similar-scroll" onMouseDown={handleMouseDown} onMouseMove={handleMouseMove}>
         {cast.map(p => (
           <div key={p.id} className="cast-card" onClick={() => handleCardClick(p)}>
@@ -1663,7 +1715,8 @@ function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
 
   useEffect(() => {
     let cancelled = false;
-    fetchPersonFilmography(person.id).then(r => { if (!cancelled) setCredits(r); }).catch(() => { if (!cancelled) setCredits([]); });
+    const fetcher = person.source === 'jikan' ? fetchVoiceActorRoles(person.id) : fetchPersonFilmography(person.id);
+    fetcher.then(r => { if (!cancelled) setCredits(r); }).catch(() => { if (!cancelled) setCredits([]); });
     return () => { cancelled = true; };
   }, [person.id]);
 
@@ -1671,7 +1724,7 @@ function PersonFilmographySheet({ person, onClose, items, onOpenResult }) {
     <div className="modal-backdrop" ref={backdropRef} onClick={onClose}>
       <div className="modal" onClick={e => e.stopPropagation()}>
         <div className="modal-head">
-          <span className="chip" style={{ '--c': '#4FA8FF' }}>Actor</span>
+          <span className="chip" style={{ '--c': '#4FA8FF' }}>{person.source === 'jikan' ? 'Voice Actor' : 'Actor'}</span>
           <button className="icon-x" onClick={onClose}><X size={18} /></button>
         </div>
         <div className="locked-title-row">
@@ -1739,10 +1792,13 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
         .catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
     }
     fetchSimilarTitles(result).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
-    // Cast only makes sense for movies/series — anime credits on TMDB are usually
-    // sparse/voice-only and not what people mean by "cast" here.
     if ((result.type === 'movie' || result.type === 'series') && result.tmdbId) {
       fetchCast(result.tmdbId, result.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+    } else if (result.type === 'anime' && result.externalId && result.externalId.startsWith('jikan-')) {
+      // Only works for genuinely Jikan-sourced entries — Kitsu/AniList ids aren't
+      // the same numbering, so there's no reliable characters lookup for those.
+      const malId = result.externalId.replace('jikan-', '');
+      fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
     }
     return () => { cancelled = true; };
   }, [result]);
@@ -1815,8 +1871,8 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
           </>
         )}
 
-        {(result.type === 'movie' || result.type === 'series') && (
-          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
+        {(result.type === 'movie' || result.type === 'series' || result.type === 'anime') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} title={result.type === 'anime' ? 'Voice Cast' : 'Cast'} />
         )}
 
         {similar && similar.length > 0 && (
@@ -2840,6 +2896,9 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
       if ((form.type === 'movie' || form.type === 'series') && dbId) {
         fetchCast(dbId, form.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+      } else if (form.type === 'anime' && form.externalId && form.externalId.startsWith('jikan-')) {
+        const malId = form.externalId.replace('jikan-', '');
+        fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
       }
       return () => { cancelled = true; };
     }
@@ -3081,8 +3140,8 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
           )}
         </div>
 
-        {isFromDb && (form.type === 'movie' || form.type === 'series') && (
-          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
+        {isFromDb && (form.type === 'movie' || form.type === 'series' || form.type === 'anime') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} title={form.type === 'anime' ? 'Voice Cast' : 'Cast'} />
         )}
 
         {isFromDb && similar && similar.length > 0 && (
