@@ -629,72 +629,93 @@ function daysUntilWeekday(dayName) {
 // Checks each in-progress / planned library item for a known upcoming episode or
 // release date. Fetched live each time the Upcoming view opens rather than cached —
 // air dates shift often enough that a stale countdown would be misleading.
-async function fetchUpcomingForItems(candidates) {
-  const settled = await Promise.allSettled(candidates.map(async (it) => {
-    if (!it.externalId) return null;
-    const dbId = it.externalId.split('-').slice(1).join('-');
+async function checkOneUpcoming(it) {
+  if (!it.externalId) return null;
+  const dbId = it.externalId.split('-').slice(1).join('-');
 
-    if (it.type === 'series') {
-      const res = await fetch(`https://api.themoviedb.org/3/tv/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const next = data.next_episode_to_air;
-      if (!next || !next.air_date) return null;
-      const days = daysUntil(next.air_date);
-      if (days < 0) return null;
-      return { item: it, days, label: `Season ${next.season_number}, Episode ${next.episode_number}` };
+  if (it.type === 'series') {
+    const res = await fetch(`https://api.themoviedb.org/3/tv/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const next = data.next_episode_to_air;
+    if (!next || !next.air_date) return null;
+    const days = daysUntil(next.air_date);
+    if (days < 0) return null;
+    return { item: it, days, label: `Season ${next.season_number}, Episode ${next.episode_number}` };
+  }
+
+  if (it.type === 'movie') {
+    const res = await fetch(`https://api.themoviedb.org/3/movie/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data.release_date) return null;
+    const days = daysUntil(data.release_date);
+    if (days < 0) return null;
+    return { item: it, days, label: 'Release' };
+  }
+
+  if (it.type === 'anime') {
+    // For a merged multi-season entry, the item's own externalId is the EARLIEST
+    // season (that's how the canonical representative is chosen) — checking that
+    // one for airing status meant a long-finished Season 1 always shadowed a
+    // Season 4 that's still airing weekly. The latest season (last in the merged
+    // list) is the one whose airing status actually matters here.
+    let animeExternalId = it.externalId;
+    if (it.mergedAnimeIds && it.mergedAnimeIds.length > 1) {
+      animeExternalId = it.mergedAnimeIds[it.mergedAnimeIds.length - 1];
     }
-
-    if (it.type === 'movie') {
-      const res = await fetch(`https://api.themoviedb.org/3/movie/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
-      if (!res.ok) return null;
-      const data = await res.json();
-      if (!data.release_date) return null;
-      const days = daysUntil(data.release_date);
-      if (days < 0) return null;
-      return { item: it, days, label: 'Release' };
+    if (!animeExternalId) return null;
+    // A genuine Jikan/MAL id can be queried directly; anything else (Kitsu/
+    // AniList) needs resolving first via a direct cross-site mapping, since MAL
+    // is the only source with airing-status and broadcast-day data.
+    let animeDbId;
+    if (animeExternalId.startsWith('jikan-')) {
+      animeDbId = animeExternalId.replace('jikan-', '');
+    } else {
+      animeDbId = await resolveJikanIdForAnime({ externalId: animeExternalId, title: it.title });
+      if (!animeDbId) return null;
     }
-
-    if (it.type === 'anime') {
-      // For a merged multi-season entry, the item's own externalId is the EARLIEST
-      // season (that's how the canonical representative is chosen) — checking that
-      // one for airing status meant a long-finished Season 1 always shadowed a
-      // Season 4 that's still airing weekly. The latest season (last in the merged
-      // list) is the one whose airing status actually matters here.
-      let animeExternalId = it.externalId;
-      if (it.mergedAnimeIds && it.mergedAnimeIds.length > 1) {
-        animeExternalId = it.mergedAnimeIds[it.mergedAnimeIds.length - 1];
-      }
-      if (!animeExternalId) return null;
-      // A genuine Jikan/MAL id can be queried directly; anything else (Kitsu/
-      // AniList) needs resolving first via a direct cross-site mapping, since MAL
-      // is the only source with airing-status and broadcast-day data.
-      let animeDbId;
-      if (animeExternalId.startsWith('jikan-')) {
-        animeDbId = animeExternalId.replace('jikan-', '');
-      } else {
-        animeDbId = await resolveJikanIdForAnime({ externalId: animeExternalId, title: it.title });
-        if (!animeDbId) return null;
-      }
-      const res = await fetch(`https://api.jikan.moe/v4/anime/${animeDbId}`);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const a = data.data;
-      if (!a) return null;
-      if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
-        const days = daysUntil(a.aired.from.slice(0, 10));
-        if (days < 0) return null;
-        return { item: it, days, label: 'Premiere' };
-      }
-      if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
-        const days = daysUntilWeekday(a.broadcast.day);
-        if (days == null) return null;
-        return { item: it, days, label: 'New episode' };
-      }
-      return null;
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${animeDbId}`, 1, 600);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const a = data.data;
+    if (!a) return null;
+    if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
+      const days = daysUntil(a.aired.from.slice(0, 10));
+      if (days < 0) return null;
+      return { item: it, days, label: 'Premiere' };
+    }
+    if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
+      const days = daysUntilWeekday(a.broadcast.day);
+      if (days == null) return null;
+      return { item: it, days, label: 'New episode' };
     }
     return null;
-  }));
+  }
+  return null;
+}
+
+async function fetchUpcomingForItems(candidates) {
+  // Movies/series hit TMDB, a different API with no shared rate limit concern here
+  // — those stay fully parallel. Anime candidates can each trigger a Kitsu/AniList
+  // lookup plus a Jikan fetch; firing several of those at once for a library with
+  // more than a couple of anime was tripping Jikan's rate limit and silently
+  // dropping results, so those go through in small sequential batches instead.
+  const tmdbCandidates = candidates.filter(it => it.type === 'movie' || it.type === 'series');
+  const animeCandidates = candidates.filter(it => it.type === 'anime');
+
+  const tmdbSettled = await Promise.allSettled(tmdbCandidates.map(checkOneUpcoming));
+
+  const animeSettled = [];
+  const BATCH_SIZE = 2;
+  for (let i = 0; i < animeCandidates.length; i += BATCH_SIZE) {
+    const batch = animeCandidates.slice(i, i + BATCH_SIZE);
+    const batchResults = await Promise.allSettled(batch.map(checkOneUpcoming));
+    animeSettled.push(...batchResults);
+    if (i + BATCH_SIZE < animeCandidates.length) await new Promise(r => setTimeout(r, 500));
+  }
+
+  const settled = [...tmdbSettled, ...animeSettled];
   return settled.filter(r => r.status === 'fulfilled' && r.value).map(r => r.value).sort((a, b) => a.days - b.days);
 }
 
