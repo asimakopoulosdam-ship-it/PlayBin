@@ -334,39 +334,78 @@ async function fetchCast(tmdbId, type) {
   } catch (e) { return []; }
 }
 
-// Several anime features (voice cast, recommendations) only exist on Jikan/MyAnimeList
-// — Kitsu and AniList don't expose the same data, and their id numbers don't mean
-// anything on MAL anyway. Rather than simply having no cast/recommendations at all
+// Several anime features (voice cast, recommendations, airing schedule) only exist
+// on Jikan/MyAnimeList — Kitsu and AniList don't expose the same data, and their id
+// numbers don't mean anything on MAL anyway. Rather than simply having none of that
 // for anime that happened to be found via Kitsu or AniList (e.g. because Jikan was
-// briefly down at search time), this looks the title up on Jikan by name to find its
-// MAL id, so those features still work most of the time. Best-effort: if Jikan can't
-// find a confident match, callers just get nothing, same as before.
-// Cached by normalized title so the SAME anime is only ever looked up once per
-// session — without this, opening one Kitsu/AniList-sourced anime fired this exact
-// search TWICE at once (once for recommendations, once for cast/airing), doubling
-// the Jikan rate-limit pressure and racing each other; a slow/failed one could then
-// leave that specific feature empty even when the other succeeded moments earlier.
-const jikanIdByTitleCache = new Map(); // normalized title -> Promise<string|null>
-function resolveJikanIdForTitle(title, year) {
-  const key = normalizeTitle(title);
-  if (jikanIdByTitleCache.has(key)) return jikanIdByTitleCache.get(key);
+// down at search time), this resolves the real MAL id through a DIRECT, authoritative
+// source first: Kitsu publishes its own cross-site mapping to MyAnimeList per anime,
+// and AniList's schema has a MAL id built right in (idMal) — neither needs any
+// fuzzy title matching or hits Jikan's search endpoint at all, which is the flakier,
+// heavier endpoint (prone to timeouts under load) compared to a plain id lookup.
+// A fuzzy title search on Jikan itself is kept only as the very last resort.
+async function resolveJikanIdViaKitsuMapping(kitsuId) {
+  try {
+    const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/mappings`, 1, 500);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = data.data || [];
+    const malMapping = list.find(m => m.attributes && m.attributes.externalSite === 'myanimelist/anime');
+    return (malMapping && malMapping.attributes.externalId) ? String(malMapping.attributes.externalId) : null;
+  } catch (e) { return null; }
+}
+async function resolveJikanIdViaAniList(anilistId) {
+  try {
+    const query = `query ($id: Int) { Media(id: $id, type: ANIME) { idMal } }`;
+    const res = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const idMal = data.data && data.data.Media && data.data.Media.idMal;
+    return idMal ? String(idMal) : null;
+  } catch (e) { return null; }
+}
+// Last-resort fuzzy fallback for anything that isn't Kitsu/AniList-sourced, or on
+// the rare chance neither mapping had a MAL entry. Only one retry — if Jikan's
+// search is genuinely struggling, hammering it further won't help.
+async function resolveJikanIdByTitleSearch(title, year) {
+  try {
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 1, 600);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = data.data || [];
+    if (list.length === 0) return null;
+    const nq = normalizeTitle(title);
+    let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
+    if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
+    if (!best) best = list[0];
+    return best ? String(best.mal_id) : null;
+  } catch (e) { return null; }
+}
+
+// Cached by the anime's own externalId (or its title, if that's all we have) so the
+// SAME anime is only ever resolved once per session — without this, opening one
+// Kitsu/AniList-sourced anime fired this lookup TWICE at once (once for
+// recommendations, once for cast/airing), doubling load on whichever source
+// answers it.
+const jikanIdByAnimeCache = new Map(); // key -> Promise<string|null>
+function resolveJikanIdForAnime(item) {
+  const key = item.externalId || normalizeTitle(item.title);
+  if (jikanIdByAnimeCache.has(key)) return jikanIdByAnimeCache.get(key);
   const promise = (async () => {
-    try {
-      const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 3, 700);
-      if (!res.ok) return null;
-      const data = await res.json();
-      const list = data.data || [];
-      if (list.length === 0) return null;
-      const nq = normalizeTitle(title);
-      // Prefer a same-year match when we have one — the single biggest disambiguator
-      // between, say, a 2014 series and its 2021 remake sharing a name.
-      let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
-      if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
-      if (!best) best = list[0];
-      return best ? String(best.mal_id) : null;
-    } catch (e) { return null; }
+    if (item.externalId && item.externalId.startsWith('kitsu-')) {
+      const viaMapping = await resolveJikanIdViaKitsuMapping(item.externalId.replace('kitsu-', ''));
+      if (viaMapping) return viaMapping;
+    } else if (item.externalId && item.externalId.startsWith('anilist-')) {
+      const viaAniList = await resolveJikanIdViaAniList(item.externalId.replace('anilist-', ''));
+      if (viaAniList) return viaAniList;
+    }
+    return resolveJikanIdByTitleSearch(item.title, item.year);
   })();
-  jikanIdByTitleCache.set(key, promise);
+  jikanIdByAnimeCache.set(key, promise);
   return promise;
 }
 
@@ -520,10 +559,9 @@ async function fetchSimilarTitles(item) {
     if (item.type === 'anime') {
       // dbId here is only a real Jikan/MAL id for items that came from Jikan in the
       // first place. For Kitsu/AniList-sourced items, that same number means
-      // something completely different on MAL — querying Jikan's recommendations
-      // with it would silently return recommendations for the WRONG anime. Instead
-      // of just giving up, look the title up on Jikan by name first.
-      let jikanId = item.externalId.startsWith('jikan-') ? dbId : await resolveJikanIdForTitle(item.title, item.year);
+      // something completely different on MAL — resolve the real one via a direct
+      // cross-site mapping instead of just giving up.
+      let jikanId = item.externalId.startsWith('jikan-') ? dbId : await resolveJikanIdForAnime(item);
       if (!jikanId) return [];
       const res = await fetch(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`);
       if (!res.ok) return [];
@@ -629,13 +667,13 @@ async function fetchUpcomingForItems(candidates) {
       }
       if (!animeExternalId) return null;
       // A genuine Jikan/MAL id can be queried directly; anything else (Kitsu/
-      // AniList) needs a title lookup first, since MAL is the only source with
-      // airing-status and broadcast-day data.
+      // AniList) needs resolving first via a direct cross-site mapping, since MAL
+      // is the only source with airing-status and broadcast-day data.
       let animeDbId;
       if (animeExternalId.startsWith('jikan-')) {
         animeDbId = animeExternalId.replace('jikan-', '');
       } else {
-        animeDbId = await resolveJikanIdForTitle(it.title, null);
+        animeDbId = await resolveJikanIdForAnime({ externalId: animeExternalId, title: it.title });
         if (!animeDbId) return null;
       }
       const res = await fetch(`https://api.jikan.moe/v4/anime/${animeDbId}`);
@@ -1887,12 +1925,12 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
       fetchCast(result.tmdbId, result.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
     } else if (result.type === 'anime' && result.externalId) {
       // Genuinely Jikan-sourced entries already have the right id; anything else
-      // (Kitsu/AniList) gets looked up by title first, since MAL is the only source
-      // with voice cast and broadcast-day data at all. Resolved once, then reused
-      // for both the voice cast and the computed "Next episode" note below.
+      // (Kitsu/AniList) gets resolved via a direct cross-site mapping, since MAL is
+      // the only source with voice cast and broadcast-day data at all. Resolved
+      // once, then reused for both the voice cast and the "Next episode" note below.
       const jikanIdPromise = result.externalId.startsWith('jikan-')
         ? Promise.resolve(result.externalId.replace('jikan-', ''))
-        : resolveJikanIdForTitle(result.title, result.year);
+        : resolveJikanIdForAnime(result);
       jikanIdPromise.then(async malId => {
         if (!malId || cancelled) return;
         await new Promise(r => setTimeout(r, 400)); // let the seasons/recommendations calls above clear first
@@ -3025,7 +3063,7 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       } else if (form.type === 'anime' && form.externalId) {
         (form.externalId.startsWith('jikan-')
           ? Promise.resolve(form.externalId.replace('jikan-', ''))
-          : resolveJikanIdForTitle(form.title, null)
+          : resolveJikanIdForAnime(form)
         ).then(malId => malId ? fetchAnimeVoiceCast(malId) : [])
           .then(r => { if (!cancelled) setCast(r); }).catch(() => {});
       }
