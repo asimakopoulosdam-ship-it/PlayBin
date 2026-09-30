@@ -92,6 +92,7 @@ async function searchMovieLive(q, tmdbKey) {
     ratingValue: m.vote_average || null, ratingSource: 'TMDB', popularityScore: m.popularity || 0,
     trailerUrl: null,
     extraNote: m.release_date ? `Released: ${formatDateISOish(m.release_date)}` : null,
+    releaseDate: m.release_date || null,
     needsDetail: true,
   }));
 }
@@ -112,6 +113,7 @@ async function searchSeriesLive(q, tmdbKey) {
       ratingValue: s.vote_average || null, ratingSource: 'TMDB', popularityScore: s.popularity || 0,
       trailerUrl: null,
       extraNote: s.first_air_date ? `Premiere: ${formatDateISOish(s.first_air_date)}` : null,
+      releaseDate: s.first_air_date || null,
       needsDetail: true,
     }));
 }
@@ -133,6 +135,7 @@ async function searchAnimeJikan(q) {
     ratingValue: a.score || null, ratingSource: 'MAL', popularityScore: a.members || 0,
     trailerUrl: (a.trailer && (a.trailer.url || (a.trailer.youtube_id ? `https://www.youtube.com/watch?v=${a.trailer.youtube_id}` : null))) || null,
     extraNote: (a.broadcast && a.broadcast.string) ? `Airing: ${a.broadcast.string}` : null,
+    releaseDate: (a.aired && a.aired.from) ? a.aired.from.slice(0, 10) : null,
   }));
 }
 
@@ -164,6 +167,7 @@ async function searchAnimeKitsu(q) {
       popularityScore: attrs.userCount || 0,
       trailerUrl: attrs.youtubeVideoId ? `https://www.youtube.com/watch?v=${attrs.youtubeVideoId}` : null,
       extraNote: null,
+      releaseDate: attrs.startDate || null,
     };
   });
 }
@@ -173,7 +177,7 @@ async function searchAnimeKitsu(q) {
 // both Jikan and Kitsu can't answer. No retry here — it's the last stop in the
 // chain, and a plain single attempt is already the fast path.
 async function searchAnimeAniListFallback(q) {
-  const query = `query ($search: String) { Page(page: 1, perPage: 15) { media(search: $search, type: ANIME) { id title { romaji english native } format status episodes duration averageScore popularity description(asHtml: false) coverImage { large } startDate { year } trailer { id site } } } }`;
+  const query = `query ($search: String) { Page(page: 1, perPage: 15) { media(search: $search, type: ANIME) { id title { romaji english native } format status episodes duration averageScore popularity description(asHtml: false) coverImage { large } startDate { year month day } trailer { id site } } } }`;
   const realRes = await fetch('https://graphql.anilist.co', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -194,6 +198,9 @@ async function searchAnimeAniListFallback(q) {
     popularityScore: a.popularity || 0,
     trailerUrl: (a.trailer && a.trailer.site === 'youtube') ? `https://www.youtube.com/watch?v=${a.trailer.id}` : null,
     extraNote: null,
+    releaseDate: (a.startDate && a.startDate.year && a.startDate.month && a.startDate.day)
+      ? `${a.startDate.year}-${String(a.startDate.month).padStart(2, '0')}-${String(a.startDate.day).padStart(2, '0')}`
+      : null,
   }));
 }
 
