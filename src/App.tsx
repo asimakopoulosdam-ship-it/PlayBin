@@ -1089,6 +1089,67 @@ function normalizeTitle(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 }
 
+// Counts the minimum single-character edits (insert/delete/substitute) to turn one
+// string into another — the standard way to measure "how close is this typo to the
+// real word". Used below so a garbled query like "onn pice" can still be recognized
+// as "One Piece" even though no literal substring/prefix match exists.
+function levenshteinDistance(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      curr[j] = a[i - 1] === b[j - 1]
+        ? prev[j - 1]
+        : 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// A short list of extremely well-known titles used purely to catch and correct
+// typos in what someone types — not a database, just enough well-known names that
+// a garbled search ("onn pice", "brething bad") still lands on the obvious answer.
+// Live search results themselves come entirely from TMDB/Jikan/Kitsu/AniList as
+// normal; this only decides what corrected query to retry with when the literal
+// one comes back empty.
+const POPULAR_TITLE_HINTS = [
+  'One Piece', 'Naruto', 'Naruto Shippuden', 'Dragon Ball Z', 'Dragon Ball Super', 'Bleach',
+  'Attack on Titan', 'Death Note', 'Demon Slayer', 'My Hero Academia', 'Jujutsu Kaisen',
+  'Fullmetal Alchemist', 'Hunter x Hunter', 'One Punch Man', 'Tokyo Ghoul', 'Fairy Tail',
+  'Sword Art Online', 'JoJo\'s Bizarre Adventure', 'Haikyuu', 'Spy x Family', 'Solo Leveling',
+  'Frieren', 'Chainsaw Man', 'Black Clover', 'Code Geass', 'Cowboy Bebop', 'Vinland Saga',
+  'The Matrix', 'Titanic', 'Avatar', 'Inception', 'Interstellar', 'The Avengers',
+  'Spider-Man', 'Spider-Man: No Way Home', 'The Dark Knight', 'Fight Club', 'Forrest Gump',
+  'The Godfather', 'Pulp Fiction', 'The Shawshank Redemption', 'Gladiator', 'Jurassic Park',
+  'Star Wars', 'The Lord of the Rings', 'Harry Potter', 'John Wick', 'Joker', 'Oppenheimer',
+  'Barbie', 'Dune', 'The Hobbit', 'Toy Story', 'Frozen', 'Moana', 'Shrek',
+  'Breaking Bad', 'Better Call Saul', 'Game of Thrones', 'Stranger Things', 'The Office',
+  'Friends', 'The Walking Dead', 'The Simpsons', 'Rick and Morty', 'The Boys',
+  'House of the Dragon', 'The Last of Us', 'Peaky Blinders', 'Money Heist', 'Squid Game',
+  'Wednesday', 'The Witcher', 'Dark', 'Chernobyl', 'Vikings', 'Narcos', 'Suits',
+];
+function correctQueryTypo(query) {
+  const q = normalizeTitle(query);
+  if (q.length < 4) return null; // too short to safely guess at
+  let best = null, bestDist = Infinity;
+  for (const title of POPULAR_TITLE_HINTS) {
+    const nt = normalizeTitle(title);
+    if (nt === q) return null; // already an exact match, nothing to correct
+    const dist = levenshteinDistance(q, nt);
+    // Scales with length — roughly one forgiven typo per 4 characters, so short
+    // titles still need to be close, while longer ones tolerate more.
+    const threshold = Math.max(1, Math.floor(nt.length / 4));
+    if (dist <= threshold && dist < bestDist) { bestDist = dist; best = title; }
+  }
+  return best;
+}
+
 // Ranks a category by how well its best match fits the query, so "Naruto" shows Anime
 // first instead of always Movies → Series → Anime regardless of relevance.
 // Combines how well the title matches with how well-known the title is, so an
@@ -1148,6 +1209,39 @@ async function searchAllSources(q) {
     allFailed: seriesR.status === 'rejected' && animeR.status === 'rejected' && movieR.status === 'rejected',
     errors,
   };
+}
+
+// Same typo-correction idea as searchAllSourcesSmart, but for a single-type search
+// function (used by My Shows' own type-scoped search, which searches only one
+// database at a time rather than all three).
+async function searchTypeSmart(fn, q) {
+  const first = await fn(q);
+  if (first.length === 0) {
+    const corrected = correctQueryTypo(q);
+    if (corrected) {
+      const second = await fn(corrected);
+      if (second.length > 0) return { results: second, correctedTo: corrected };
+    }
+  }
+  return { results: first, correctedTo: null };
+}
+
+// Wraps searchAllSources with a typo-correction retry: if the literal query comes
+// back completely empty (and the sources themselves didn't just fail), try the
+// closest well-known title instead. correctedFrom/correctedTo are set only when
+// that retry is what actually produced the results, so the UI can say so.
+async function searchAllSourcesSmart(q) {
+  const first = await searchAllSources(q);
+  const isEmpty = first.series.length === 0 && first.anime.length === 0 && first.movie.length === 0;
+  if (isEmpty && !first.allFailed) {
+    const corrected = correctQueryTypo(q);
+    if (corrected) {
+      const second = await searchAllSources(corrected);
+      const stillEmpty = second.series.length === 0 && second.anime.length === 0 && second.movie.length === 0;
+      if (!stillEmpty) return { ...second, correctedFrom: q, correctedTo: corrected };
+    }
+  }
+  return first;
 }
 
 /* ---------------------------------- small UI atoms ---------------------------------- */
@@ -1921,7 +2015,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     debounceRef.current = setTimeout(async () => {
       addToHistory(q);
       try {
-        const r = await searchAllSources(q);
+        const r = await searchAllSourcesSmart(q);
         setResults(r);
         if (r.allFailed) {
           setSearchError("Couldn't reach the database right now — check your connection and try again in a moment.");
@@ -2106,13 +2200,16 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
       {results && hasAnyResults && (
         <div className="group" style={{ marginTop: 16 }}>
           <div className="group-title" style={{ color: '#7ED957' }}>Results</div>
+          {results.correctedTo && (
+            <p className="dim" style={{ padding: '0 2px 8px' }}>Showing results for "{results.correctedTo}"</p>
+          )}
           <div className="result-list">
             {[
               ...(typeFilter === 'all' || typeFilter === 'movie' ? results.movie : []),
               ...(typeFilter === 'all' || typeFilter === 'series' ? results.series : []),
               ...(typeFilter === 'all' || typeFilter === 'anime' ? results.anime : []),
             ]
-              .sort((a, b) => searchScore(b, query) - searchScore(a, query))
+              .sort((a, b) => searchScore(b, results.correctedTo || query) - searchScore(a, results.correctedTo || query))
               .map(r => {
                 const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
                 return (
@@ -2207,6 +2304,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
   const [query, setQuery] = useState('');
   const [searching, setSearching] = useState(false);
   const [results, setResults] = useState(null);
+  const [correctedTo, setCorrectedTo] = useState(null);
   const [error, setError] = useState('');
   const [resultStack, setResultStack] = useState([]);
   const activeResult = resultStack.length > 0 ? resultStack[resultStack.length - 1] : null;
@@ -2217,13 +2315,14 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     const q = query.trim();
-    if (q.length < 2) { setResults(null); setSearching(false); setError(''); return; }
+    if (q.length < 2) { setResults(null); setCorrectedTo(null); setSearching(false); setError(''); return; }
     setSearching(true); setError('');
     debounceRef.current = setTimeout(async () => {
       try {
         const fn = type === 'movie' ? searchMovieDB : type === 'series' ? searchSeriesDB : searchAnimeDB;
-        const r = await fn(q);
+        const { results: r, correctedTo: ct } = await searchTypeSmart(fn, q);
         setResults(r);
+        setCorrectedTo(ct);
       } catch (e) {
         setError("Couldn't search right now — try again in a moment.");
         setResults(null);
@@ -2266,6 +2365,8 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
         )}
 
         {results && results.length > 0 && (
+          <>
+            {correctedTo && <p className="dim" style={{ padding: '10px 2px 0' }}>Showing results for "{correctedTo}"</p>}
           <div className="result-list" style={{ marginTop: 14 }}>
             {results.map(r => {
               const matched = items.find(i => i.externalId === r.externalId && i.type === r.type);
@@ -2282,6 +2383,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
               );
             })}
           </div>
+          </>
         )}
       </div>
 
