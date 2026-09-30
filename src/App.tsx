@@ -1930,7 +1930,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
         setSearchError("Couldn't connect to the database. Try again.");
         setResults(null);
       } finally { setSearching(false); }
-    }, 450);
+    }, 280);
     return () => clearTimeout(debounceRef.current);
   }, [query]);
 
@@ -2228,7 +2228,7 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
         setError("Couldn't search right now — try again in a moment.");
         setResults(null);
       } finally { setSearching(false); }
-    }, 450);
+    }, 280);
     return () => clearTimeout(debounceRef.current);
   }, [query, type]);
 
