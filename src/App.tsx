@@ -109,6 +109,16 @@ function useBodyScrollLock(scrollRef) {
   }, []);
 }
 
+// True only while the stored release/premiere date is a real date in the future.
+// Naturally flips to false once that date passes — no backfill or update needed,
+// the item just starts showing normally again on its own.
+function isUnreleased(item) {
+  if (!item.releaseDate) return false;
+  const d = new Date(item.releaseDate);
+  if (isNaN(d.getTime())) return false;
+  return d > new Date();
+}
+
 function computeMinutes(item) {
   if (item.type === 'movie') {
     return item.status === 'completed' ? (Number(item.movieMinutes) || TYPE_META.movie.defaultMinutes) : 0;
@@ -2512,7 +2522,11 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   const [upcomingList, setUpcomingList] = useState(null);
   const [loadingUpcoming, setLoadingUpcoming] = useState(false);
   const meta = TYPE_META[activeType];
-  const filtered = items.filter(i => i.type === activeType);
+  const allOfType = items.filter(i => i.type === activeType);
+  // Not-yet-released titles stay out of Planned/Watching/Watched entirely — they
+  // only show in Upcoming until their release/premiere date actually passes.
+  const filtered = allOfType.filter(i => !isUnreleased(i));
+  const unreleasedCount = allOfType.length - filtered.length;
   const groups = ['watching', 'planned', 'completed'].map(st => ({
     status: st,
     list: sortItems(filtered.filter(i => i.status === st), sortBy),
@@ -2605,8 +2619,18 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
             </div>
           )}
 
+          {unreleasedCount > 0 && (
+            <p className="dim" style={{ padding: '0 2px 12px' }}>
+              {unreleasedCount} not yet released — see Upcoming above
+            </p>
+          )}
+
           {filtered.length === 0 ? (
-            <EmptyState text={`You haven't added any ${meta.singular.toLowerCase()} yet.`} cta="Tap + to search for it" />
+            unreleasedCount > 0 ? (
+              <EmptyState text={`Nothing released yet for ${meta.label.toLowerCase()}.`} cta="Check Upcoming above for what's coming" />
+            ) : (
+              <EmptyState text={`You haven't added any ${meta.singular.toLowerCase()} yet.`} cta="Tap + to search for it" />
+            )
           ) : (
             groups.map(g => g.list.length > 0 && (
               <div className="group" key={g.status}>
@@ -3653,6 +3677,11 @@ export default function App() {
       mergedAnimeIds: (result.mergedAnimeIds && result.mergedAnimeIds.length > 1) ? result.mergedAnimeIds : null,
       mergedAnimeMeta: (result.mergedAnimeMeta && result.mergedAnimeMeta.length > 1) ? result.mergedAnimeMeta : null,
       seasonCount: result.seasonCount || null,
+      // Whether this has actually come out yet at all — not the same thing as an
+      // ongoing show's next episode. Used to keep not-yet-released titles out of
+      // the normal Planned/Watching/Watched groups until they're real; the item
+      // reappears there on its own once this date passes, no action needed.
+      releaseDate: result.releaseDate || null,
       dateAdded: now, dateWatched: status === 'completed' ? now : null,
     };
     persist([...items, newItem]);
