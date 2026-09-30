@@ -20,6 +20,8 @@ const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
 const CACHE_SECONDS = 60 * 60 * 24; // 24 hours — overall popularity shifts slowly
 const PER_PAGE = 10;
 
+// Used for TMDB calls, which have no fallback source — worth a couple of retries
+// to ride out a one-off blip.
 async function fetchWithRetry(url, retries = 2, delayMs = 900) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
@@ -31,6 +33,15 @@ async function fetchWithRetry(url, retries = 2, delayMs = 900) {
     }
     await new Promise(r => setTimeout(r, delayMs));
   }
+}
+
+// Anime sources form a fallback chain (Jikan -> Kitsu -> AniList). Retrying the
+// same struggling source for ~1.8s before even trying the next one (the old
+// 2-retry/900ms default) made Zapping feel sluggish whenever Jikan was degraded.
+// One quick retry with a short delay still rides out a one-off blip, but failing
+// fast matters far more here — the next source in the chain is usually healthy.
+async function fetchAnimeSourceFast(url) {
+  return fetchWithRetry(url, 1, 300);
 }
 
 async function popularMoviesLive(tmdbKey, page) {
@@ -74,7 +85,7 @@ async function popularSeriesLive(tmdbKey, page) {
 async function popularAnimeLiveJikan(page) {
   // bypopularity ranks by MAL member/popularity count, not score — matches "popular"
   // rather than "critically top-rated", and isn't restricted to currently-airing.
-  const res = await fetchWithRetry(`https://api.jikan.moe/v4/top/anime?filter=bypopularity&limit=${PER_PAGE}&page=${page}`);
+  const res = await fetchAnimeSourceFast(`https://api.jikan.moe/v4/top/anime?filter=bypopularity&limit=${PER_PAGE}&page=${page}`);
   if (!res.ok) throw new Error('jikan popular failed');
   const data = await res.json();
   const list = data.data || [];
@@ -94,7 +105,7 @@ async function popularAnimeLiveJikan(page) {
 }
 
 async function popularAnimeLiveKitsu(page) {
-  const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime?sort=-userCount&page[limit]=${PER_PAGE}&page[offset]=${(page - 1) * PER_PAGE}`);
+  const res = await fetchAnimeSourceFast(`https://kitsu.io/api/edge/anime?sort=-userCount&page[limit]=${PER_PAGE}&page[offset]=${(page - 1) * PER_PAGE}`);
   if (!res.ok) throw new Error('kitsu popular failed');
   const data = await res.json();
   const list = data.data || [];
