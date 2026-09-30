@@ -341,21 +341,33 @@ async function fetchCast(tmdbId, type) {
 // briefly down at search time), this looks the title up on Jikan by name to find its
 // MAL id, so those features still work most of the time. Best-effort: if Jikan can't
 // find a confident match, callers just get nothing, same as before.
-async function resolveJikanIdForTitle(title, year) {
-  try {
-    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 2, 500);
-    if (!res.ok) return null;
-    const data = await res.json();
-    const list = data.data || [];
-    if (list.length === 0) return null;
-    const nq = normalizeTitle(title);
-    // Prefer a same-year match when we have one — the single biggest disambiguator
-    // between, say, a 2014 series and its 2021 remake sharing a name.
-    let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
-    if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
-    if (!best) best = list[0];
-    return best ? String(best.mal_id) : null;
-  } catch (e) { return null; }
+// Cached by normalized title so the SAME anime is only ever looked up once per
+// session — without this, opening one Kitsu/AniList-sourced anime fired this exact
+// search TWICE at once (once for recommendations, once for cast/airing), doubling
+// the Jikan rate-limit pressure and racing each other; a slow/failed one could then
+// leave that specific feature empty even when the other succeeded moments earlier.
+const jikanIdByTitleCache = new Map(); // normalized title -> Promise<string|null>
+function resolveJikanIdForTitle(title, year) {
+  const key = normalizeTitle(title);
+  if (jikanIdByTitleCache.has(key)) return jikanIdByTitleCache.get(key);
+  const promise = (async () => {
+    try {
+      const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 3, 700);
+      if (!res.ok) return null;
+      const data = await res.json();
+      const list = data.data || [];
+      if (list.length === 0) return null;
+      const nq = normalizeTitle(title);
+      // Prefer a same-year match when we have one — the single biggest disambiguator
+      // between, say, a 2014 series and its 2021 remake sharing a name.
+      let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
+      if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
+      if (!best) best = list[0];
+      return best ? String(best.mal_id) : null;
+    } catch (e) { return null; }
+  })();
+  jikanIdByTitleCache.set(key, promise);
+  return promise;
 }
 
 // Voice cast for anime — Jikan's characters endpoint, not TMDB (TMDB's anime credits
