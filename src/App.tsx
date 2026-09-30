@@ -343,7 +343,7 @@ async function fetchCast(tmdbId, type) {
 // find a confident match, callers just get nothing, same as before.
 async function resolveJikanIdForTitle(title, year) {
   try {
-    const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`);
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 2, 500);
     if (!res.ok) return null;
     const data = await res.json();
     const list = data.data || [];
@@ -365,7 +365,7 @@ async function resolveJikanIdForTitle(title, year) {
 // original voice cast and the one people usually mean by "who voices this".
 async function fetchAnimeVoiceCast(malId) {
   try {
-    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}/characters`);
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/characters`, 2, 500);
     if (!res.ok) return [];
     const data = await res.json();
     const list = data.data || [];
@@ -393,7 +393,7 @@ async function fetchAnimeVoiceCast(malId) {
 // isn't left with just a raw "Airing: Sundays" text while series get a real date.
 async function fetchAnimeAiringNote(malId) {
   try {
-    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}`);
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}`, 2, 500);
     if (!res.ok) return null;
     const data = await res.json();
     const a = data.data;
@@ -1881,9 +1881,11 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
       const jikanIdPromise = result.externalId.startsWith('jikan-')
         ? Promise.resolve(result.externalId.replace('jikan-', ''))
         : resolveJikanIdForTitle(result.title, result.year);
-      jikanIdPromise.then(malId => {
-        if (!malId) return;
+      jikanIdPromise.then(async malId => {
+        if (!malId || cancelled) return;
+        await new Promise(r => setTimeout(r, 400)); // let the seasons/recommendations calls above clear first
         fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+        await new Promise(r => setTimeout(r, 400));
         fetchAnimeAiringNote(malId).then(note => { if (!cancelled && note) setDetail(d => ({ ...d, extraNote: note })); }).catch(() => {});
       });
     }
