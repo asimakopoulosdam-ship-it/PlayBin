@@ -324,6 +324,30 @@ async function fetchCast(tmdbId, type) {
   } catch (e) { return []; }
 }
 
+// Several anime features (voice cast, recommendations) only exist on Jikan/MyAnimeList
+// — Kitsu and AniList don't expose the same data, and their id numbers don't mean
+// anything on MAL anyway. Rather than simply having no cast/recommendations at all
+// for anime that happened to be found via Kitsu or AniList (e.g. because Jikan was
+// briefly down at search time), this looks the title up on Jikan by name to find its
+// MAL id, so those features still work most of the time. Best-effort: if Jikan can't
+// find a confident match, callers just get nothing, same as before.
+async function resolveJikanIdForTitle(title, year) {
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const list = data.data || [];
+    if (list.length === 0) return null;
+    const nq = normalizeTitle(title);
+    // Prefer a same-year match when we have one — the single biggest disambiguator
+    // between, say, a 2014 series and its 2021 remake sharing a name.
+    let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
+    if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
+    if (!best) best = list[0];
+    return best ? String(best.mal_id) : null;
+  } catch (e) { return null; }
+}
+
 // Voice cast for anime — Jikan's characters endpoint, not TMDB (TMDB's anime credits
 // are sparse and usually don't list voice actors at all). Only works for genuinely
 // Jikan-sourced entries (see fetchSeasonsFor and similar for why — Kitsu/AniList ids
@@ -446,12 +470,13 @@ async function fetchSimilarTitles(item) {
     }
     if (item.type === 'anime') {
       // dbId here is only a real Jikan/MAL id for items that came from Jikan in the
-      // first place. For AniList-sourced items (externalId "anilist-XXXX", used when
-      // Jikan was down at search time), that same number means something completely
-      // different on MAL — querying Jikan's recommendations with it would silently
-      // return recommendations for the WRONG anime instead of just failing. Skip it.
-      if (!item.externalId.startsWith('jikan-')) return [];
-      const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}/recommendations`);
+      // first place. For Kitsu/AniList-sourced items, that same number means
+      // something completely different on MAL — querying Jikan's recommendations
+      // with it would silently return recommendations for the WRONG anime. Instead
+      // of just giving up, look the title up on Jikan by name first.
+      let jikanId = item.externalId.startsWith('jikan-') ? dbId : await resolveJikanIdForTitle(item.title, item.year);
+      if (!jikanId) return [];
+      const res = await fetch(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`);
       if (!res.ok) return [];
       const data = await res.json();
       const raw = (data.data || []).slice(0, 8).map(r => ({
@@ -544,11 +569,27 @@ async function fetchUpcomingForItems(candidates) {
     }
 
     if (it.type === 'anime') {
-      // Only a genuine Jikan/MAL id means anything here — for Kitsu- or AniList-
-      // sourced items the same number refers to a totally different anime on MAL,
-      // so querying Jikan with it would silently show the wrong countdown.
-      if (!it.externalId || !it.externalId.startsWith('jikan-')) return null;
-      const res = await fetch(`https://api.jikan.moe/v4/anime/${dbId}`);
+      // For a merged multi-season entry, the item's own externalId is the EARLIEST
+      // season (that's how the canonical representative is chosen) — checking that
+      // one for airing status meant a long-finished Season 1 always shadowed a
+      // Season 4 that's still airing weekly. The latest season (last in the merged
+      // list) is the one whose airing status actually matters here.
+      let animeExternalId = it.externalId;
+      if (it.mergedAnimeIds && it.mergedAnimeIds.length > 1) {
+        animeExternalId = it.mergedAnimeIds[it.mergedAnimeIds.length - 1];
+      }
+      if (!animeExternalId) return null;
+      // A genuine Jikan/MAL id can be queried directly; anything else (Kitsu/
+      // AniList) needs a title lookup first, since MAL is the only source with
+      // airing-status and broadcast-day data.
+      let animeDbId;
+      if (animeExternalId.startsWith('jikan-')) {
+        animeDbId = animeExternalId.replace('jikan-', '');
+      } else {
+        animeDbId = await resolveJikanIdForTitle(it.title, null);
+        if (!animeDbId) return null;
+      }
+      const res = await fetch(`https://api.jikan.moe/v4/anime/${animeDbId}`);
       if (!res.ok) return null;
       const data = await res.json();
       const a = data.data;
@@ -1794,11 +1835,15 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
     fetchSimilarTitles(result).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
     if ((result.type === 'movie' || result.type === 'series') && result.tmdbId) {
       fetchCast(result.tmdbId, result.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
-    } else if (result.type === 'anime' && result.externalId && result.externalId.startsWith('jikan-')) {
-      // Only works for genuinely Jikan-sourced entries — Kitsu/AniList ids aren't
-      // the same numbering, so there's no reliable characters lookup for those.
-      const malId = result.externalId.replace('jikan-', '');
-      fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+    } else if (result.type === 'anime' && result.externalId) {
+      // Genuinely Jikan-sourced entries already have the right id; anything else
+      // (Kitsu/AniList) gets looked up by title first, since MAL is the only source
+      // with voice cast data at all.
+      (result.externalId.startsWith('jikan-')
+        ? Promise.resolve(result.externalId.replace('jikan-', ''))
+        : resolveJikanIdForTitle(result.title, result.year)
+      ).then(malId => malId ? fetchAnimeVoiceCast(malId) : [])
+        .then(r => { if (!cancelled) setCast(r); }).catch(() => {});
     }
     return () => { cancelled = true; };
   }, [result]);
@@ -2476,7 +2521,12 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
   const openUpcoming = async () => {
     setUpcomingOpen(true);
     setLoadingUpcoming(true);
-    const candidates = items.filter(i => i.status === 'watching' || i.status === 'planned');
+    // 'completed' is included too: marking a currently-airing anime "Watched" once
+    // you're caught up on everything available doesn't mean the show itself is
+    // over — it can still get new episodes. For movies/finished series this check
+    // naturally comes back empty (already-released dates just fail the "days < 0"
+    // test), so it's harmless to include them here as well.
+    const candidates = items.filter(i => i.status === 'watching' || i.status === 'planned' || i.status === 'completed');
     try {
       const list = await fetchUpcomingForItems(candidates);
       setUpcomingList(list);
@@ -2896,9 +2946,12 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
       if ((form.type === 'movie' || form.type === 'series') && dbId) {
         fetchCast(dbId, form.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
-      } else if (form.type === 'anime' && form.externalId && form.externalId.startsWith('jikan-')) {
-        const malId = form.externalId.replace('jikan-', '');
-        fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
+      } else if (form.type === 'anime' && form.externalId) {
+        (form.externalId.startsWith('jikan-')
+          ? Promise.resolve(form.externalId.replace('jikan-', ''))
+          : resolveJikanIdForTitle(form.title, null)
+        ).then(malId => malId ? fetchAnimeVoiceCast(malId) : [])
+          .then(r => { if (!cancelled) setCast(r); }).catch(() => {});
       }
       return () => { cancelled = true; };
     }
