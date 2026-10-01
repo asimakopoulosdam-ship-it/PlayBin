@@ -119,8 +119,18 @@ function isUnreleased(item) {
   return d > new Date();
 }
 
+// An anime entry whose actual format is a standalone film (Jikan subtype "Movie",
+// Kitsu "movie", AniList format "MOVIE") should be tracked the same way a movie is
+// — a single runtime, not an episode checklist — rather than forced into "1/1
+// episode" the way every other anime result is. Stays filed under the Anime tab
+// (same type, color, icon) since that's still the right category for it; only the
+// tracking behavior changes.
+function isAnimeMovie(item) {
+  return item && item.type === 'anime' && item.isMovieFormat === true;
+}
+
 function computeMinutes(item) {
-  if (item.type === 'movie') {
+  if (item.type === 'movie' || isAnimeMovie(item)) {
     return item.status === 'completed' ? (Number(item.movieMinutes) || TYPE_META.movie.defaultMinutes) : 0;
   }
   const eps = item.externalId ? (item.watchedEpisodeIds || []).length : (Number(item.episodesWatched) || 0);
@@ -1262,7 +1272,12 @@ async function fetchAnimeSeasonsMerged(malIds) {
   for (const info of ordered) {
     let eps = [];
     try { eps = await fetchAnimeEpisodesForId(info.malId); } catch (e) { eps = []; }
-    if (eps.length === 0) continue;
+    // A real episode count of exactly 1 is almost always a one-off bonus/
+    // announcement episode that got swept into the merge (e.g. Mob Psycho 100's
+    // single-episode "Reigen" entry) — the episode-count check at merge time
+    // often can't catch this, since that count is frequently null/unknown until
+    // the real episode list is actually fetched, which is only here.
+    if (eps.length <= 1) continue;
     seasons.push({
       seasonNumber: seasonNum,
       seasonTitle: info.title,
@@ -1395,12 +1410,18 @@ async function fetchAnimeSeasonsAcrossSources(members) {
   perMember.forEach(({ member, subSeasons }) => {
     if (!subSeasons || subSeasons.length === 0) return;
     if (subSeasons.length === 1) {
+      // A real episode count of exactly 1 is almost always a one-off bonus/
+      // announcement episode swept into the merge, not a real season — only
+      // catchable here, once the actual episode list is in hand (the episode
+      // count at merge-decision time is frequently null/unknown).
+      if ((subSeasons[0].episodes || []).length <= 1) return;
       flattened.push({ seasonTitle: member.title, episodes: subSeasons[0].episodes });
     } else {
       // The member itself already split into multiple year-based groups (e.g. a
       // very long-running original series) — keep those, just labeled under this
       // season's own name too so it's clear which part of the franchise they're in.
       subSeasons.forEach(s => {
+        if ((s.episodes || []).length <= 1) return;
         flattened.push({ seasonTitle: `${member.title} — ${seasonLabel(s)}`, episodes: s.episodes });
       });
     }
@@ -1611,7 +1632,7 @@ function Poster({ item, size = 56 }) {
 
 function ItemRow({ item, onClick, showType }) {
   const meta = TYPE_META[item.type];
-  const isEpisodic = item.type !== 'movie';
+  const isEpisodic = item.type !== 'movie' && !isAnimeMovie(item);
   const watchedCount = item.externalId ? (item.watchedEpisodeIds || []).length : (item.episodesWatched || 0);
   return (
     <button className="item-row" onClick={onClick}>
@@ -1644,7 +1665,7 @@ function SwipeableItemRow({ item, onClick, showType, onDelete, onAdvanceEpisode,
   const startX = useRef(null);
   const startedOpen = useRef(null);
   const dragging = useRef(false);
-  const isEpisodic = item.type !== 'movie';
+  const isEpisodic = item.type !== 'movie' && !isAnimeMovie(item);
   const isFullyWatched = isEpisodic && item.totalEpisodes && (item.watchedEpisodeIds || []).length >= item.totalEpisodes;
 
   const baseX = open === 'left' ? SWIPE_OPEN_LEFT : open === 'right' ? SWIPE_OPEN_RIGHT : 0;
@@ -2059,6 +2080,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
   const existingItem = items.find(i => i.externalId === result.externalId && i.type === result.type);
   const already = !!existingItem;
   const notYetReleased = !!(detail.releaseDate && new Date(detail.releaseDate) > new Date());
+  const isAnimeMovieResult = result.type === 'anime' && result.subtype && String(result.subtype).toUpperCase() === 'MOVIE';
   const watchedSet = new Set((existingItem && existingItem.watchedEpisodeIds) || []);
   const dbId = (result.externalId || '').split('-').slice(1).join('-');
 
@@ -2070,7 +2092,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
         if (!cancelled) setDetail(d => ({ ...d, ...extra }));
       }).catch(() => {}).finally(() => { if (!cancelled) setLoadingMore(false); });
     }
-    if (result.type !== 'movie') {
+    if (result.type !== 'movie' && !isAnimeMovieResult) {
       setLoadingSeasons(true);
       fetchSeasonsFor(result).then(r => { if (!cancelled) setSeasons(r); })
         .catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
@@ -2154,7 +2176,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
 
         {/* Same checklist preview you'd see once it's in My Shows — tapping it adds the
             show to your list ("Want to watch") if it isn't there yet. */}
-        {result.type !== 'movie' && (
+        {result.type !== 'movie' && !isAnimeMovieResult && (
           <>
             <div className="field-label" style={{ marginTop: 16 }}>Episodes</div>
             {loadingSeasons && <p className="dim" style={{ padding: '6px 2px 4px' }}>Loading seasons…</p>}
@@ -3194,7 +3216,7 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
   useBodyScrollLock(backdropRef);
   const [form, setForm] = useState(draft);
   const meta = TYPE_META[form.type];
-  const isEpisodic = form.type !== 'movie';
+  const isEpisodic = form.type !== 'movie' && !isAnimeMovie(form);
   const isNew = !draft.id || draft.__isNew;
   const isFromDb = !!form.externalId;
   const dbId = (form.externalId || '').split('-').slice(1).join('-');
@@ -3972,7 +3994,8 @@ export default function App() {
 
     const type = TYPE_META[result.type] ? result.type : 'movie';
     const now = new Date().toISOString();
-    const isEpisodic = type !== 'movie';
+    const isAnimeMovieFormat = type === 'anime' && result.subtype && String(result.subtype).toUpperCase() === 'MOVIE';
+    const isEpisodic = type !== 'movie' && !isAnimeMovieFormat;
     let watchedEpisodeIds = [];
     // When a result represents multiple merged seasons, the individual result's own
     // "episodes" count only reflects its own season — leave the total unset until the
@@ -4007,6 +4030,10 @@ export default function App() {
       mergedAnimeIds: (result.mergedAnimeIds && result.mergedAnimeIds.length > 1) ? result.mergedAnimeIds : null,
       mergedAnimeMeta: (result.mergedAnimeMeta && result.mergedAnimeMeta.length > 1) ? result.mergedAnimeMeta : null,
       seasonCount: result.seasonCount || null,
+      // True only for anime whose real format is a standalone film — tracked like
+      // a movie (single runtime, no episode checklist) instead of the usual anime
+      // episode-tracking treatment.
+      isMovieFormat: isAnimeMovieFormat || undefined,
       // Whether this has actually come out yet at all — not the same thing as an
       // ongoing show's next episode. Used to keep not-yet-released titles out of
       // the normal Planned/Watching/Watched groups until they're real; the item
