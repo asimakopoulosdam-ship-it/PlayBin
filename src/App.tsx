@@ -557,11 +557,22 @@ async function fetchSimilarTitles(item) {
         }));
     }
     if (item.type === 'anime') {
+      // For a merged multi-season entry, item.externalId is the EARLIEST season —
+      // the latest/ongoing one tends to have more community-submitted
+      // recommendations on MAL than an old first season does, same reasoning as
+      // the airing-status check elsewhere.
+      let animeExternalId = item.externalId;
+      if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) {
+        animeExternalId = item.mergedAnimeIds[item.mergedAnimeIds.length - 1];
+      }
+      const animeDbId = (animeExternalId || '').split('-').slice(1).join('-');
       // dbId here is only a real Jikan/MAL id for items that came from Jikan in the
       // first place. For Kitsu/AniList-sourced items, that same number means
       // something completely different on MAL — resolve the real one via a direct
       // cross-site mapping instead of just giving up.
-      let jikanId = item.externalId.startsWith('jikan-') ? dbId : await resolveJikanIdForAnime(item);
+      let jikanId = animeExternalId && animeExternalId.startsWith('jikan-')
+        ? animeDbId
+        : await resolveJikanIdForAnime({ externalId: animeExternalId, title: item.title, year: item.year });
       if (!jikanId) return [];
       const res = await fetch(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`);
       if (!res.ok) return [];
@@ -1952,16 +1963,13 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
     } else if (result.type === 'anime' && result.externalId) {
       // Genuinely Jikan-sourced entries already have the right id; anything else
       // (Kitsu/AniList) gets resolved via a direct cross-site mapping, since MAL is
-      // the only source with voice cast and broadcast-day data at all. Resolved
-      // once, then reused for both the voice cast and the "Next episode" note below.
+      // the only source with broadcast-day data at all.
       const jikanIdPromise = result.externalId.startsWith('jikan-')
         ? Promise.resolve(result.externalId.replace('jikan-', ''))
         : resolveJikanIdForAnime(result);
       jikanIdPromise.then(async malId => {
         if (!malId || cancelled) return;
         await new Promise(r => setTimeout(r, 400)); // let the seasons/recommendations calls above clear first
-        fetchAnimeVoiceCast(malId).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
-        await new Promise(r => setTimeout(r, 400));
         fetchAnimeAiringNote(malId).then(note => { if (!cancelled && note) setDetail(d => ({ ...d, extraNote: note })); }).catch(() => {});
       });
     }
@@ -2042,8 +2050,8 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
           </>
         )}
 
-        {(result.type === 'movie' || result.type === 'series' || result.type === 'anime') && (
-          <CastStrip cast={cast} onOpenPerson={setActivePerson} title={result.type === 'anime' ? 'Voice Cast' : 'Cast'} />
+        {(result.type === 'movie' || result.type === 'series') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
         )}
 
         {similar && similar.length > 0 && (
@@ -3102,12 +3110,6 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
       if ((form.type === 'movie' || form.type === 'series') && dbId) {
         fetchCast(dbId, form.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
-      } else if (form.type === 'anime' && form.externalId) {
-        (form.externalId.startsWith('jikan-')
-          ? Promise.resolve(form.externalId.replace('jikan-', ''))
-          : resolveJikanIdForAnime(form)
-        ).then(malId => malId ? fetchAnimeVoiceCast(malId) : [])
-          .then(r => { if (!cancelled) setCast(r); }).catch(() => {});
       }
       return () => { cancelled = true; };
     }
@@ -3349,8 +3351,8 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
           )}
         </div>
 
-        {isFromDb && (form.type === 'movie' || form.type === 'series' || form.type === 'anime') && (
-          <CastStrip cast={cast} onOpenPerson={setActivePerson} title={form.type === 'anime' ? 'Voice Cast' : 'Cast'} />
+        {isFromDb && (form.type === 'movie' || form.type === 'series') && (
+          <CastStrip cast={cast} onOpenPerson={setActivePerson} />
         )}
 
         {isFromDb && similar && similar.length > 0 && (
