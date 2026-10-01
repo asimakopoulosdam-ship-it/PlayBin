@@ -3102,12 +3102,26 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
   const [addedSimilar, setAddedSimilar] = useState(() => new Set());
   const [cast, setCast] = useState(null);
   const [activePerson, setActivePerson] = useState(null);
+  // "Next episode: <date>" / "This show has ended" — previously only shown while
+  // browsing in Discover before adding something; My Shows' own item view never
+  // showed it at all, for series or anime, even though that's the more natural
+  // place to check "when's the next episode of what I'm already watching".
+  const [airingNote, setAiringNote] = useState(null);
   const watchedSet = new Set(form.watchedEpisodeIds || []);
 
   useEffect(() => {
     if (isFromDb) {
       let cancelled = false;
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
+      if (form.type === 'series' && dbId) {
+        fetchSeriesDetail(dbId).then(d => { if (!cancelled && d.extraNote) setAiringNote(d.extraNote); }).catch(() => {});
+      } else if (form.type === 'anime' && form.externalId) {
+        (form.externalId.startsWith('jikan-')
+          ? Promise.resolve(form.externalId.replace('jikan-', ''))
+          : resolveJikanIdForAnime(form)
+        ).then(malId => malId ? fetchAnimeAiringNote(malId) : null)
+          .then(note => { if (!cancelled && note) setAiringNote(note); }).catch(() => {});
+      }
       if ((form.type === 'movie' || form.type === 'series') && dbId) {
         fetchCast(dbId, form.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
       }
@@ -3234,6 +3248,7 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
               />
             )}
             {isFromDb && <ExternalStars value={form.externalRating} source={form.externalRatingSource} size={13} />}
+            {isFromDb && airingNote && <div className="detail-note">{airingNote}</div>}
           </div>
         </div>
 
