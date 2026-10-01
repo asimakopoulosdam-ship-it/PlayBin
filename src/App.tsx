@@ -3295,18 +3295,28 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
           const results = await searchAnimeDB(form.title);
           const candidates = results.filter(r =>
             key && franchiseGroupKeyForTitle(r.title) === key &&
-            r.mergedAnimeIds && r.mergedAnimeIds.length > form.mergedAnimeIds.length
+            r.mergedAnimeIds && r.mergedAnimeIds.length > 1
           );
-          const fresh = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
-          if (fresh && !cancelled) {
-            const updated = {
-              ...form,
-              mergedAnimeIds: fresh.mergedAnimeIds,
-              mergedAnimeMeta: fresh.mergedAnimeMeta,
-              seasonCount: fresh.seasonCount,
-            };
-            setForm(updated);
-            persistNow(updated);
+          const bestFresh = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
+          if (bestFresh && !cancelled) {
+            // Union by externalId rather than trusting this one search to be
+            // complete — any season this item already knew about stays, plus
+            // anything new this search found, deduped and re-sorted by year.
+            const metaById = new Map();
+            (form.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
+            (bestFresh.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
+            const mergedMeta = Array.from(metaById.values())
+              .sort((a, b) => parseInt(a.year || '9999', 10) - parseInt(b.year || '9999', 10));
+            if (mergedMeta.length > form.mergedAnimeIds.length) {
+              const updated = {
+                ...form,
+                mergedAnimeIds: mergedMeta.map(m => m.externalId),
+                mergedAnimeMeta: mergedMeta,
+                seasonCount: mergedMeta.length,
+              };
+              setForm(updated);
+              persistNow(updated);
+            }
           }
         } catch (e) { /* best-effort — stale data just stays as-is until next open */ }
       })();
