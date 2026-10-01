@@ -1106,8 +1106,13 @@ async function resolveFranchiseEnrichment(key, item) {
   const promise = (async () => {
     try {
       // Strips a trailing season marker so the search finds the base franchise —
-      // handles both "Title Season 4" and Kitsu's bare "Title 4" styles.
-      const query = item.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
+      // handles both "Title Season 4" and Kitsu's bare "Title 4" styles. Only
+      // splits on a colon when there's a real title before it (4+ chars) — a short
+      // prefix like "Re:" is part of the name itself (e.g. "Re:Zero"), not a
+      // season separator, and blindly splitting on it broke those titles entirely.
+      const colonIdx = item.title.indexOf(':');
+      const base = colonIdx > 3 ? item.title.slice(0, colonIdx) : item.title;
+      const query = base.replace(/\s+(season\s*)?\d+$/i, '').trim();
       const searchResults = await searchAnimeDB(query);
       const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
       return fullMatch || null;
@@ -3283,8 +3288,11 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       (async () => {
         try {
           const key = franchiseGroupKeyForTitle(form.title);
-          const baseQuery = form.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
-          const results = await searchAnimeDB(baseQuery);
+          // form.title is already the clean canonical (season 1) title stored on
+          // this item — no need to strip anything from it. A blind colon-split
+          // here previously broke titles where the colon is part of the name
+          // itself rather than a season separator (e.g. "Re:Zero" became just "Re").
+          const results = await searchAnimeDB(form.title);
           const fresh = results.find(r =>
             key && franchiseGroupKeyForTitle(r.title) === key &&
             r.mergedAnimeIds && r.mergedAnimeIds.length > form.mergedAnimeIds.length
