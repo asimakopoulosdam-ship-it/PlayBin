@@ -683,10 +683,17 @@ async function fetchAniListNextEpisodeByMalId(malId) {
 // vanishing the instant the date arrives, then naturally expires and the next
 // check fetches fresh data for whatever episode comes after.
 const ANIME_UPCOMING_CACHE_KEY = 'wl-anime-upcoming-cache-v1';
+// Returns null (no cache), { miss: true } (a cached failure — don't retry yet), or
+// { days, label } (a real cached result).
 function getCachedAnimeUpcoming(cacheKey) {
   const cache = storageGet(ANIME_UPCOMING_CACHE_KEY, {});
   const entry = cache[cacheKey];
-  if (!entry || !entry.nextEpisodeDate) return null;
+  if (!entry) return null;
+  if (entry.miss) {
+    if (Date.now() > entry.expiresAt) return null; // miss expired, allow a retry
+    return { miss: true };
+  }
+  if (!entry.nextEpisodeDate) return null;
   const targetMs = new Date(entry.nextEpisodeDate + 'T00:00:00').getTime();
   if (isNaN(targetMs)) return null;
   const graceMs = targetMs + 24 * 60 * 60 * 1000; // +1 day so it doesn't disappear the moment it's "Now"
@@ -697,6 +704,16 @@ function getCachedAnimeUpcoming(cacheKey) {
 function cacheAnimeUpcoming(cacheKey, nextEpisodeDate, label) {
   const cache = storageGet(ANIME_UPCOMING_CACHE_KEY, {});
   cache[cacheKey] = { nextEpisodeDate, label };
+  storageSet(ANIME_UPCOMING_CACHE_KEY, cache);
+}
+// Negative cache: an anime whose id couldn't be resolved, or that genuinely has no
+// upcoming episode data anywhere, would otherwise retry that same slow, failing
+// chain (Kitsu mapping -> AniList -> Jikan fallback) on every single Upcoming open.
+// One day is enough to stop that without permanently hiding a show that might get
+// real schedule data later.
+function cacheAnimeMiss(cacheKey) {
+  const cache = storageGet(ANIME_UPCOMING_CACHE_KEY, {});
+  cache[cacheKey] = { miss: true, expiresAt: Date.now() + 24 * 60 * 60 * 1000 };
   storageSet(ANIME_UPCOMING_CACHE_KEY, cache);
 }
 
@@ -728,7 +745,7 @@ async function checkOneUpcoming(it) {
   if (it.type === 'anime') {
     const cacheKey = it.id; // the library item's own stable id
     const cached = getCachedAnimeUpcoming(cacheKey);
-    if (cached) return { item: it, days: cached.days, label: cached.label };
+    if (cached) return cached.miss ? null : { item: it, days: cached.days, label: cached.label };
 
     // For a merged multi-season entry, the item's own externalId is the EARLIEST
     // season (that's how the canonical representative is chosen) — checking that
@@ -739,7 +756,7 @@ async function checkOneUpcoming(it) {
     if (it.mergedAnimeIds && it.mergedAnimeIds.length > 1) {
       animeExternalId = it.mergedAnimeIds[it.mergedAnimeIds.length - 1];
     }
-    if (!animeExternalId) return null;
+    if (!animeExternalId) { cacheAnimeMiss(cacheKey); return null; }
     // A genuine Jikan/MAL id can be queried directly; anything else (Kitsu/
     // AniList) needs resolving first via a direct cross-site mapping, since MAL
     // is the only source with airing-status and broadcast-day data.
@@ -748,7 +765,7 @@ async function checkOneUpcoming(it) {
       animeDbId = animeExternalId.replace('jikan-', '');
     } else {
       animeDbId = await resolveJikanIdForAnime({ externalId: animeExternalId, title: it.title });
-      if (!animeDbId) return null;
+      if (!animeDbId) { cacheAnimeMiss(cacheKey); return null; }
     }
     // Try the precise AniList timestamp first — more reliable than Jikan's
     // broadcast-weekday guess, and this is exactly the check that kept
@@ -761,24 +778,25 @@ async function checkOneUpcoming(it) {
     }
 
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${animeDbId}`, 1, 600);
-    if (!res.ok) return null;
+    if (!res.ok) { cacheAnimeMiss(cacheKey); return null; }
     const data = await res.json();
     const a = data.data;
-    if (!a) return null;
+    if (!a) { cacheAnimeMiss(cacheKey); return null; }
     if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
       const premiereDate = a.aired.from.slice(0, 10);
       const days = daysUntil(premiereDate);
-      if (days < 0) return null;
+      if (days < 0) { cacheAnimeMiss(cacheKey); return null; }
       cacheAnimeUpcoming(cacheKey, premiereDate, 'Premiere');
       return { item: it, days, label: 'Premiere' };
     }
     if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
       const days = daysUntilWeekday(a.broadcast.day);
-      if (days == null) return null;
+      if (days == null) { cacheAnimeMiss(cacheKey); return null; }
       const nextDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
       return { item: it, days, label: 'New episode' };
     }
+    cacheAnimeMiss(cacheKey);
     return null;
   }
   return null;
