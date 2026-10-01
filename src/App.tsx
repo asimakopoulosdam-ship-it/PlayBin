@@ -442,11 +442,19 @@ async function fetchAnimeVoiceCast(malId) {
 // precise scheduled timestamp and is tried first; Jikan's broadcast weekday is only
 // a fallback guess for whatever AniList doesn't have.
 async function fetchAnimeAiringNote(malId) {
+  const cacheKey = `mal:${malId}`;
+  const cached = getCachedAnimeUpcoming(cacheKey);
+  if (cached) {
+    const d = new Date(Date.now() + cached.days * 24 * 60 * 60 * 1000);
+    const dateStr = formatDateGr(d.toISOString().slice(0, 10));
+    return cached.label === 'Premiere' ? `Premieres: ${dateStr}` : `Next episode: ${dateStr}`;
+  }
   try {
     const viaAniList = await fetchAniListNextEpisodeByMalId(malId);
     if (viaAniList) {
-      const d = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000);
-      return `Next episode: ${formatDateGr(d.toISOString().slice(0, 10))}`;
+      const nextDate = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
+      return `Next episode: ${formatDateGr(nextDate)}`;
     }
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}`, 2, 500);
     if (!res.ok) return null;
@@ -454,14 +462,16 @@ async function fetchAnimeAiringNote(malId) {
     const a = data.data;
     if (!a) return null;
     if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
-      return `Premieres: ${formatDateGr(a.aired.from)}`;
+      const premiereDate = a.aired.from.slice(0, 10);
+      cacheAnimeUpcoming(cacheKey, premiereDate, 'Premiere');
+      return `Premieres: ${formatDateGr(premiereDate)}`;
     }
     if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
       const days = daysUntilWeekday(a.broadcast.day);
       if (days == null) return null;
-      const d = new Date();
-      d.setDate(d.getDate() + days);
-      return `Next episode: ${formatDateGr(d.toISOString().slice(0, 10))}`;
+      const nextDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
+      return `Next episode: ${formatDateGr(nextDate)}`;
     }
     if (a.status === 'Finished Airing') return 'This anime has finished airing';
     return null;
@@ -666,6 +676,30 @@ async function fetchAniListNextEpisodeByMalId(malId) {
   } catch (e) { return null; }
 }
 
+// Caches each anime's next-episode date so Upcoming doesn't need a live AniList/
+// Jikan call every single time it's opened. Stores the actual target date (not a
+// countdown number, which would go stale) — valid until one day after that date
+// has passed, so the item keeps showing (including "Now" once it's due) instead of
+// vanishing the instant the date arrives, then naturally expires and the next
+// check fetches fresh data for whatever episode comes after.
+const ANIME_UPCOMING_CACHE_KEY = 'wl-anime-upcoming-cache-v1';
+function getCachedAnimeUpcoming(cacheKey) {
+  const cache = storageGet(ANIME_UPCOMING_CACHE_KEY, {});
+  const entry = cache[cacheKey];
+  if (!entry || !entry.nextEpisodeDate) return null;
+  const targetMs = new Date(entry.nextEpisodeDate + 'T00:00:00').getTime();
+  if (isNaN(targetMs)) return null;
+  const graceMs = targetMs + 24 * 60 * 60 * 1000; // +1 day so it doesn't disappear the moment it's "Now"
+  if (Date.now() > graceMs) return null; // expired — time for a fresh look
+  const days = Math.max(0, Math.ceil((targetMs - Date.now()) / (1000 * 60 * 60 * 24)));
+  return { days, label: entry.label };
+}
+function cacheAnimeUpcoming(cacheKey, nextEpisodeDate, label) {
+  const cache = storageGet(ANIME_UPCOMING_CACHE_KEY, {});
+  cache[cacheKey] = { nextEpisodeDate, label };
+  storageSet(ANIME_UPCOMING_CACHE_KEY, cache);
+}
+
 async function checkOneUpcoming(it) {
   if (!it.externalId) return null;
   const dbId = it.externalId.split('-').slice(1).join('-');
@@ -692,6 +726,10 @@ async function checkOneUpcoming(it) {
   }
 
   if (it.type === 'anime') {
+    const cacheKey = it.id; // the library item's own stable id
+    const cached = getCachedAnimeUpcoming(cacheKey);
+    if (cached) return { item: it, days: cached.days, label: cached.label };
+
     // For a merged multi-season entry, the item's own externalId is the EARLIEST
     // season (that's how the canonical representative is chosen) — checking that
     // one for airing status meant a long-finished Season 1 always shadowed a
@@ -716,7 +754,11 @@ async function checkOneUpcoming(it) {
     // broadcast-weekday guess, and this is exactly the check that kept
     // inconsistently showing/missing airing anime before.
     const viaAniList = await fetchAniListNextEpisodeByMalId(animeDbId);
-    if (viaAniList) return { item: it, days: viaAniList.days, label: 'New episode' };
+    if (viaAniList) {
+      const nextDate = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
+      return { item: it, days: viaAniList.days, label: 'New episode' };
+    }
 
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${animeDbId}`, 1, 600);
     if (!res.ok) return null;
@@ -724,13 +766,17 @@ async function checkOneUpcoming(it) {
     const a = data.data;
     if (!a) return null;
     if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
-      const days = daysUntil(a.aired.from.slice(0, 10));
+      const premiereDate = a.aired.from.slice(0, 10);
+      const days = daysUntil(premiereDate);
       if (days < 0) return null;
+      cacheAnimeUpcoming(cacheKey, premiereDate, 'Premiere');
       return { item: it, days, label: 'Premiere' };
     }
     if (a.status === 'Currently Airing' && a.broadcast && a.broadcast.day) {
       const days = daysUntilWeekday(a.broadcast.day);
       if (days == null) return null;
+      const nextDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
       return { item: it, days, label: 'New episode' };
     }
     return null;
