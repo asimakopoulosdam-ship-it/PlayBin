@@ -819,13 +819,25 @@ async function fetchUpcomingForItems(candidates, onProgress) {
   let accumulated = pluck(tmdbSettled);
   if (onProgress) onProgress([...accumulated].sort((a, b) => a.days - b.days));
 
+  // Anime already answered by the cache (a real result OR a cached miss) resolve
+  // instantly with no network call at all — no reason to pace those through the
+  // batch delay below, which exists only to protect against the rate limit a LIVE
+  // lookup chain would actually hit.
+  const cachedAnime = [];
+  const uncachedAnime = [];
+  animeCandidates.forEach(it => (getCachedAnimeUpcoming(it.id) ? cachedAnime : uncachedAnime).push(it));
+
+  const cachedSettled = await Promise.allSettled(cachedAnime.map(checkOneUpcoming));
+  accumulated = [...accumulated, ...pluck(cachedSettled)];
+  if (onProgress) onProgress([...accumulated].sort((a, b) => a.days - b.days));
+
   const BATCH_SIZE = 2;
-  for (let i = 0; i < animeCandidates.length; i += BATCH_SIZE) {
-    const batch = animeCandidates.slice(i, i + BATCH_SIZE);
+  for (let i = 0; i < uncachedAnime.length; i += BATCH_SIZE) {
+    const batch = uncachedAnime.slice(i, i + BATCH_SIZE);
     const batchResults = await Promise.allSettled(batch.map(checkOneUpcoming));
     accumulated = [...accumulated, ...pluck(batchResults)];
     if (onProgress) onProgress([...accumulated].sort((a, b) => a.days - b.days));
-    if (i + BATCH_SIZE < animeCandidates.length) await new Promise(r => setTimeout(r, 500));
+    if (i + BATCH_SIZE < uncachedAnime.length) await new Promise(r => setTimeout(r, 500));
   }
 
   return accumulated.sort((a, b) => a.days - b.days);
