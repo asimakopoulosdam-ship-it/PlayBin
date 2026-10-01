@@ -1,9 +1,23 @@
 // Save this file as: api/upcoming.js  (inside the "api" folder at your project root)
 // Powers the "Upcoming" tab in Discover — announced titles across movies, series,
-// and anime, sorted by whichever comes soonest. Same simple approach as search.js /
-// trending.js — no caching yet, just a secure proxy with automatic retry.
+// and anime, sorted by whichever comes soonest.
+//
+// Now cached via Vercel KV, same pattern as search.js/popular.js. Previously this
+// hit Jikan live on every single open of the Upcoming tab with no caching at all —
+// combined with Jikan's own occasional slowness/rate-limiting, that's exactly what
+// made the anime side of this feel inconsistent ("works sometimes, not others").
+// Serving a cached result means it only needs to succeed live once per cache
+// window, not on every single page load.
+
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
 
 const TMDB_IMG = 'https://image.tmdb.org/t/p/w500';
+const CACHE_SECONDS = 60 * 60 * 6; // 6 hours — episode/premiere schedules don't shift fast enough to need fresher than this
 
 function formatDateISOish(dateStr) {
   if (!dateStr) return null;
@@ -12,10 +26,10 @@ function formatDateISOish(dateStr) {
   } catch (e) { return dateStr; }
 }
 
-async function fetchWithRetry(url, retries = 2, delayMs = 900) {
+async function fetchWithRetry(url, retries = 2, delayMs = 900, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, options);
       if (res.ok) return res;
       if (attempt === retries) return res;
     } catch (e) {
@@ -73,10 +87,7 @@ async function upcomingSeries(tmdbKey) {
     }));
 }
 
-// Anime that hasn't premiered yet at all (announced new seasons/shows). This alone
-// used to be the ENTIRE anime side of Upcoming — which is why currently-airing
-// anime (by far what most people actually want to know about — "when's the next
-// episode of the show I'm already watching") never showed up here at all.
+// Anime that hasn't premiered yet at all (announced new seasons/shows).
 async function upcomingAnimeNotYetAired() {
   const res = await fetchAnimeSourceFast(`https://api.jikan.moe/v4/seasons/upcoming?limit=15`);
   if (!res.ok) throw new Error('jikan upcoming failed');
@@ -96,58 +107,44 @@ async function upcomingAnimeNotYetAired() {
   }));
 }
 
-// Weekday name (as Jikan gives it, e.g. "Sundays") -> how many days from today
-// until that weekday next occurs (0 = today).
-function daysUntilWeekday(dayName) {
-  const names = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
-  const idx = names.findIndex(d => dayName && dayName.toLowerCase().includes(d));
-  if (idx === -1) return null;
-  const today = new Date().getUTCDay();
-  let diff = idx - today;
-  if (diff < 0) diff += 7;
-  return diff;
-}
-function nextDateForWeekday(dayName) {
-  const days = daysUntilWeekday(dayName);
-  if (days == null) return null;
-  const d = new Date();
-  d.setUTCDate(d.getUTCDate() + days);
-  return d.toISOString().slice(0, 10);
-}
-
-// Anime that IS currently airing, with its next episode's date worked out from the
-// weekly broadcast day Jikan reports (there's no per-episode air-date endpoint for
-// currently-airing anime the way TMDB has next_episode_to_air for TV — the weekday
-// is the best signal available, same approach the app already uses client-side for
-// library items in fetchUpcomingForItems).
+// Anime that IS currently airing, with its EXACT next episode date/time — switched
+// from Jikan's broadcast-day guesswork (Jikan only reports a weekday like "Sundays",
+// so the actual date had to be computed/approximated) to AniList's nextAiringEpisode
+// field, which gives a precise Unix timestamp for the next episode directly. More
+// accurate, and spreads load away from Jikan, which this whole feature depends on
+// heavily elsewhere already.
 async function upcomingAnimeAiring() {
-  const res = await fetchAnimeSourceFast(`https://api.jikan.moe/v4/seasons/now?limit=25`);
-  if (!res.ok) throw new Error('jikan seasons now failed');
+  const query = `query { Page(page: 1, perPage: 25) { media(type: ANIME, status: RELEASING, sort: POPULARITY_DESC) { id title { romaji english native } format episodes averageScore popularity description(asHtml: false) coverImage { large } startDate { year } nextAiringEpisode { airingAt episode } trailer { id site } } } }`;
+  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ query }),
+  });
+  if (!res.ok) throw new Error('anilist airing anime failed');
   const data = await res.json();
-  const list = data.data || [];
+  const list = (data.data && data.data.Page && data.data.Page.media) || [];
   return list
-    .filter(a => a.broadcast && a.broadcast.day)
+    .filter(a => a.nextAiringEpisode && a.nextAiringEpisode.airingAt)
     .map(a => {
-      const nextDate = nextDateForWeekday(a.broadcast.day);
-      if (!nextDate) return null;
+      const airingDate = new Date(a.nextAiringEpisode.airingAt * 1000).toISOString().slice(0, 10);
       return {
-        source: 'jikan', type: 'anime', subtype: a.type || null, externalId: `jikan-${a.mal_id}`,
-        title: a.title_english || a.title,
-        altTitles: [a.title, a.title_english, a.title_japanese].filter(Boolean),
-        year: (a.aired && a.aired.from) ? a.aired.from.slice(0, 4) : (a.year || null),
-        posterUrl: (a.images && a.images.jpg && (a.images.jpg.large_image_url || a.images.jpg.image_url)) || null,
-        summary: a.synopsis || '',
-        episodes: a.episodes || null, runtimeMinutes: null, statusText: a.status,
-        ratingValue: a.score || null, ratingSource: 'MAL', popularityScore: a.members || 0,
-        trailerUrl: (a.trailer && (a.trailer.url || (a.trailer.youtube_id ? `https://www.youtube.com/watch?v=${a.trailer.youtube_id}` : null))) || null,
-        releaseDate: nextDate,
-        extraNote: `New episode: ${formatDateISOish(nextDate)}${a.broadcast.string ? ` (${a.broadcast.string})` : ''}`,
+        source: 'anilist', type: 'anime', subtype: a.format || null, externalId: `anilist-${a.id}`,
+        title: a.title.english || a.title.romaji,
+        altTitles: [a.title.romaji, a.title.english, a.title.native].filter(Boolean),
+        year: (a.startDate && a.startDate.year) || null,
+        posterUrl: (a.coverImage && a.coverImage.large) || null,
+        summary: (a.description || '').replace(/<[^>]+>/g, ''),
+        episodes: a.episodes || null, runtimeMinutes: null, statusText: 'Currently Airing',
+        ratingValue: a.averageScore ? Math.round(a.averageScore) / 10 : null, ratingSource: 'AniList',
+        popularityScore: a.popularity || 0,
+        trailerUrl: (a.trailer && a.trailer.site === 'youtube') ? `https://www.youtube.com/watch?v=${a.trailer.id}` : null,
+        releaseDate: airingDate,
+        extraNote: `New episode: ${formatDateISOish(airingDate)} (Ep ${a.nextAiringEpisode.episode})`,
       };
-    })
-    .filter(Boolean);
+    });
 }
 
-export default async function handler(req, res) {
+async function buildUpcoming() {
   const [m, s, aUpcoming, aAiring] = await Promise.allSettled([
     upcomingMovies(process.env.TMDB_API_KEY),
     upcomingSeries(process.env.TMDB_API_KEY),
@@ -162,9 +159,10 @@ export default async function handler(req, res) {
   // The same anime could in principle show up in both anime lists — keep the
   // not-yet-aired entry (its premiere date) over a duplicate airing entry if that
   // ever happens, since a show can't be both mid-broadcast and unaired at once in
-  // practice, but this keeps the merge safe either way.
-  const seen = new Set(notYetAired.map(a => a.externalId));
-  const anime = [...notYetAired, ...airing.filter(a => !seen.has(a.externalId))];
+  // practice, but this keeps the merge safe either way. Matched by title since the
+  // two lists come from different sources (Jikan ids vs AniList ids).
+  const seenTitles = new Set(notYetAired.map(a => a.title.toLowerCase()));
+  const anime = [...notYetAired, ...airing.filter(a => !seenTitles.has(a.title.toLowerCase()))];
 
   const combined = [...movie, ...series, ...anime].sort((x, y) => {
     if (!x.releaseDate) return 1;
@@ -172,8 +170,28 @@ export default async function handler(req, res) {
     return new Date(x.releaseDate) - new Date(y.releaseDate);
   });
 
+  return combined;
+}
+
+export default async function handler(req, res) {
+  const cacheKey = 'upcoming:v2';
+  const kv = await getKv();
+
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) return res.status(200).json({ results: cached, cached: true });
+    } catch (e) { /* KV unreachable — fall through to a live build */ }
+  }
+
+  const combined = await buildUpcoming();
+
   if (combined.length === 0) {
     return res.status(502).json({ error: 'Upstream sources unavailable right now' });
+  }
+
+  if (kv) {
+    try { await kv.set(cacheKey, combined, { ex: CACHE_SECONDS }); } catch (e) { /* not fatal */ }
   }
 
   return res.status(200).json({ results: combined, cached: false });
