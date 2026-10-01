@@ -302,6 +302,7 @@ async function fetchSeriesDetail(tmdbId) {
     statusText: (s.genres || []).map(g => g.name).slice(0, 2).join(', ') || null,
     trailerUrl: trailer ? `https://www.youtube.com/watch?v=${trailer.key}` : null,
     extraNote: nextEp ? `Next episode: ${formatDateGr(nextEp.air_date)}` : (s.status === 'Ended' ? 'This series has ended' : null),
+    rawStatus: s.status || null,
   };
 }
 
@@ -451,7 +452,7 @@ async function fetchAnimeVoiceCast(malId) {
 // (next_episode_to_air). AniList's nextAiringEpisode (looked up by MAL id) gives a
 // precise scheduled timestamp and is tried first; Jikan's broadcast weekday is only
 // a fallback guess for whatever AniList doesn't have.
-async function fetchAnimeAiringNote(malId) {
+async function fetchAnimeAiringNote(malId, itemId) {
   const cacheKey = `mal:${malId}`;
   const cached = getCachedAnimeUpcoming(cacheKey);
   if (cached) {
@@ -464,6 +465,7 @@ async function fetchAnimeAiringNote(malId) {
     if (viaAniList) {
       const nextDate = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
+      if (itemId) cacheShowStatus(itemId, 'continuing');
       return `Next episode: ${formatDateGr(nextDate)}`;
     }
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}`, 2, 500);
@@ -471,6 +473,7 @@ async function fetchAnimeAiringNote(malId) {
     const data = await res.json();
     const a = data.data;
     if (!a) return null;
+    if (itemId && a.status) cacheShowStatus(itemId, a.status === 'Finished Airing' ? 'ended' : 'continuing');
     if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
       const premiereDate = a.aired.from.slice(0, 10);
       cacheAnimeUpcoming(cacheKey, premiereDate, 'Premiere');
@@ -727,6 +730,26 @@ function cacheAnimeMiss(cacheKey) {
   storageSet(ANIME_UPCOMING_CACHE_KEY, cache);
 }
 
+// Whether a series/anime has ended or is still ongoing — shown as a small badge
+// next to each item in My Shows. Populated only as a side effect of checks that
+// already run elsewhere (the Upcoming check, opening an item's own page) — never
+// by a fetch of its own, so showing this badge never adds any extra network calls
+// or slows down the list. A show simply has no badge until one of those other
+// checks has happened to run for it at least once.
+const SHOW_STATUS_CACHE_KEY = 'wl-show-status-cache-v1';
+const SHOW_STATUS_TTL_MS = 3 * 24 * 60 * 60 * 1000; // 3 days — this rarely flips quickly
+function getCachedShowStatus(itemId) {
+  const cache = storageGet(SHOW_STATUS_CACHE_KEY, {});
+  const entry = cache[itemId];
+  if (!entry || Date.now() - entry.checkedAt > SHOW_STATUS_TTL_MS) return null;
+  return entry.status; // 'ended' | 'continuing'
+}
+function cacheShowStatus(itemId, status) {
+  const cache = storageGet(SHOW_STATUS_CACHE_KEY, {});
+  cache[itemId] = { status, checkedAt: Date.now() };
+  storageSet(SHOW_STATUS_CACHE_KEY, cache);
+}
+
 async function checkOneUpcoming(it) {
   if (!it.externalId) return null;
   const dbId = it.externalId.split('-').slice(1).join('-');
@@ -735,6 +758,7 @@ async function checkOneUpcoming(it) {
     const res = await fetch(`https://api.themoviedb.org/3/tv/${dbId}?api_key=${TMDB_API_KEY}&language=en-US`);
     if (!res.ok) return null;
     const data = await res.json();
+    if (data.status) cacheShowStatus(it.id, (data.status === 'Ended' || data.status === 'Canceled') ? 'ended' : 'continuing');
     const next = data.next_episode_to_air;
     if (!next || !next.air_date) return null;
     const days = daysUntil(next.air_date);
@@ -784,6 +808,7 @@ async function checkOneUpcoming(it) {
     if (viaAniList) {
       const nextDate = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
       cacheAnimeUpcoming(cacheKey, nextDate, 'New episode');
+      cacheShowStatus(cacheKey, 'continuing');
       return { item: it, days: viaAniList.days, label: 'New episode' };
     }
 
@@ -792,6 +817,7 @@ async function checkOneUpcoming(it) {
     const data = await res.json();
     const a = data.data;
     if (!a) { cacheAnimeMiss(cacheKey); return null; }
+    if (a.status) cacheShowStatus(cacheKey, a.status === 'Finished Airing' ? 'ended' : 'continuing');
     if (a.status === 'Not yet aired' && a.aired && a.aired.from) {
       const premiereDate = a.aired.from.slice(0, 10);
       const days = daysUntil(premiereDate);
@@ -1634,6 +1660,10 @@ function ItemRow({ item, onClick, showType }) {
   const meta = TYPE_META[item.type];
   const isEpisodic = item.type !== 'movie' && !isAnimeMovie(item);
   const watchedCount = item.externalId ? (item.watchedEpisodeIds || []).length : (item.episodesWatched || 0);
+  // Only for series/anime, and only when a status is already known from an earlier
+  // check (Upcoming, or having opened this item before) — never fetched fresh here,
+  // so this never adds any delay to the list itself.
+  const showStatus = isEpisodic ? getCachedShowStatus(item.id) : null;
   return (
     <button className="item-row" onClick={onClick}>
       <Poster item={item} size={46} />
@@ -1647,6 +1677,8 @@ function ItemRow({ item, onClick, showType }) {
             <span className="dim">{((item.movieMinutes || TYPE_META.movie.defaultMinutes) / 60).toFixed(1)}h</span>
           )}
           {item.rating ? <span className="dim">★ {item.rating}/10</span> : null}
+          {showStatus === 'ended' && <span className="dim status-pill">Ended</span>}
+          {showStatus === 'continuing' && <span className="status-pill status-pill-live">Continuing</span>}
         </div>
       </div>
       <span className="status-dot" style={{ '--c': STATUS_META[item.status].color }} />
@@ -3254,7 +3286,11 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       let cancelled = false;
       fetchSimilarTitles(form).then(r => { if (!cancelled) setSimilar(r); }).catch(() => {});
       if (form.type === 'series' && dbId) {
-        fetchSeriesDetail(dbId).then(d => { if (!cancelled && d.extraNote) setAiringNote(d.extraNote); }).catch(() => {});
+        fetchSeriesDetail(dbId).then(d => {
+          if (cancelled) return;
+          if (d.extraNote) setAiringNote(d.extraNote);
+          if (d.rawStatus) cacheShowStatus(form.id, (d.rawStatus === 'Ended' || d.rawStatus === 'Canceled') ? 'ended' : 'continuing');
+        }).catch(() => {});
       } else if (form.type === 'anime' && form.externalId) {
         // For a merged multi-season entry, form.externalId is the EARLIEST season —
         // the latest one (last in the merged list) is the one whose airing status
@@ -3265,7 +3301,7 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
         (latestExternalId.startsWith('jikan-')
           ? Promise.resolve(latestExternalId.replace('jikan-', ''))
           : resolveJikanIdForAnime({ externalId: latestExternalId, title: form.title })
-        ).then(malId => malId ? fetchAnimeAiringNote(malId) : null)
+        ).then(malId => malId ? fetchAnimeAiringNote(malId, form.id) : null)
           .then(note => { if (!cancelled && note) setAiringNote(note); }).catch(() => {});
       }
       if ((form.type === 'movie' || form.type === 'series') && dbId) {
@@ -4488,6 +4524,8 @@ function GlobalStyle() {
       .dim { color: var(--muted); font-size: 11.5px; }
       .chip { font-size: 10px; font-weight: 700; padding: 2px 7px; border-radius: 100px; color: var(--c); background: color-mix(in srgb, var(--c) 16%, transparent); border: 1px solid color-mix(in srgb, var(--c) 40%, transparent); }
       .chip-mini { font-size: 9px; padding: 1px 6px; }
+      .status-pill { font-size: 9.5px; font-weight: 700; padding: 2px 7px; border-radius: 100px; color: var(--muted); background: var(--surface2); border: 1px solid var(--border); }
+      .status-pill-live { color: #7ED957; background: rgba(126,217,87,0.14); border-color: rgba(126,217,87,0.4); }
       .status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--c); flex-shrink: 0; }
       .poster { border-radius: 8px; overflow: hidden; display: flex; align-items: center; justify-content: center; flex-shrink: 0; background: linear-gradient(155deg, color-mix(in srgb, var(--c) 30%, var(--surface2)), var(--surface2)); border: 1px solid color-mix(in srgb, var(--c) 45%, var(--border)); }
       .poster img { width: 100%; height: 100%; object-fit: cover; }
