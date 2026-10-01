@@ -3285,39 +3285,48 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
   useEffect(() => {
     if (isFromDb && form.type === 'anime' && form.mergedAnimeIds && form.mergedAnimeIds.length > 1) {
       let cancelled = false;
+      // formRef always has the latest form, read fresh inside each attempt below —
+      // the first attempt's own successful update (if any) should count as the
+      // starting point for the retry, not the original stale value from render time.
+      const attemptRefresh = async (currentForm) => {
+        const key = franchiseGroupKeyForTitle(currentForm.title);
+        // currentForm.title is already the clean canonical (season 1) title stored
+        // on this item — no need to strip anything from it. A blind colon-split
+        // here previously broke titles where the colon is part of the name itself
+        // rather than a season separator (e.g. "Re:Zero" became just "Re").
+        const results = await searchAnimeDB(currentForm.title);
+        const candidates = results.filter(r =>
+          key && franchiseGroupKeyForTitle(r.title) === key &&
+          r.mergedAnimeIds && r.mergedAnimeIds.length > 1
+        );
+        const bestFresh = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
+        if (!bestFresh) return currentForm;
+        // Union by externalId rather than trusting this one search to be complete
+        // — any season this item already knew about stays, plus anything new this
+        // search found, deduped and re-sorted by year.
+        const metaById = new Map();
+        (currentForm.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
+        (bestFresh.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
+        const mergedMeta = Array.from(metaById.values())
+          .sort((a, b) => parseInt(a.year || '9999', 10) - parseInt(b.year || '9999', 10));
+        if (mergedMeta.length <= currentForm.mergedAnimeIds.length) return currentForm;
+        const updated = {
+          ...currentForm,
+          mergedAnimeIds: mergedMeta.map(m => m.externalId),
+          mergedAnimeMeta: mergedMeta,
+          seasonCount: mergedMeta.length,
+        };
+        setForm(updated);
+        persistNow(updated);
+        return updated;
+      };
       (async () => {
         try {
-          const key = franchiseGroupKeyForTitle(form.title);
-          // form.title is already the clean canonical (season 1) title stored on
-          // this item — no need to strip anything from it. A blind colon-split
-          // here previously broke titles where the colon is part of the name
-          // itself rather than a season separator (e.g. "Re:Zero" became just "Re").
-          const results = await searchAnimeDB(form.title);
-          const candidates = results.filter(r =>
-            key && franchiseGroupKeyForTitle(r.title) === key &&
-            r.mergedAnimeIds && r.mergedAnimeIds.length > 1
-          );
-          const bestFresh = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
-          if (bestFresh && !cancelled) {
-            // Union by externalId rather than trusting this one search to be
-            // complete — any season this item already knew about stays, plus
-            // anything new this search found, deduped and re-sorted by year.
-            const metaById = new Map();
-            (form.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
-            (bestFresh.mergedAnimeMeta || []).forEach(m => metaById.set(m.externalId, m));
-            const mergedMeta = Array.from(metaById.values())
-              .sort((a, b) => parseInt(a.year || '9999', 10) - parseInt(b.year || '9999', 10));
-            if (mergedMeta.length > form.mergedAnimeIds.length) {
-              const updated = {
-                ...form,
-                mergedAnimeIds: mergedMeta.map(m => m.externalId),
-                mergedAnimeMeta: mergedMeta,
-                seasonCount: mergedMeta.length,
-              };
-              setForm(updated);
-              persistNow(updated);
-            }
-          }
+          let latest = await attemptRefresh(form);
+          if (cancelled) return;
+          await new Promise(r => setTimeout(r, 4000));
+          if (cancelled) return;
+          await attemptRefresh(latest);
         } catch (e) { /* best-effort — stale data just stays as-is until next open */ }
       })();
       return () => { cancelled = true; };
