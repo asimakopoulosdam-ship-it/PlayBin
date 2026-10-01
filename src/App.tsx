@@ -1677,8 +1677,8 @@ function ItemRow({ item, onClick, showType }) {
             <span className="dim">{((item.movieMinutes || TYPE_META.movie.defaultMinutes) / 60).toFixed(1)}h</span>
           )}
           {item.rating ? <span className="dim">★ {item.rating}/10</span> : null}
-          {showStatus === 'ended' && <span className="dim status-pill">Ended</span>}
-          {showStatus === 'continuing' && <span className="status-pill status-pill-live">Continuing</span>}
+          {showStatus === 'ended' && <span className="dim status-pill">Finished</span>}
+          {showStatus === 'continuing' && <span className="status-pill status-pill-live">Continue</span>}
         </div>
       </div>
       <span className="status-dot" style={{ '--c': STATUS_META[item.status].color }} />
