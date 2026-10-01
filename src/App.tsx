@@ -266,10 +266,10 @@ async function searchMovieDB(q) { return searchViaProxy('movie', q); }
 
 // Retries once after a short pause — used by the remaining direct-to-source calls
 // below (detail/season/episode lookups aren't cached server-side yet).
-async function fetchWithRetry(url, retries = 2, delayMs = 1200) {
+async function fetchWithRetry(url, retries = 2, delayMs = 1200, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, options);
       if (res.ok) return res;
       if (attempt === retries) return res;
     } catch (e) {
@@ -438,12 +438,16 @@ async function fetchAnimeVoiceCast(malId) {
 }
 
 // Anime doesn't have a per-episode air-date endpoint the way TMDB does for series
-// (next_episode_to_air) — the weekly broadcast day is the best signal Jikan gives.
-// This turns that into the same "Next episode: <date>" note series already show,
-// computed the same way the Upcoming tab does it, so an anime's own detail view
-// isn't left with just a raw "Airing: Sundays" text while series get a real date.
+// (next_episode_to_air). AniList's nextAiringEpisode (looked up by MAL id) gives a
+// precise scheduled timestamp and is tried first; Jikan's broadcast weekday is only
+// a fallback guess for whatever AniList doesn't have.
 async function fetchAnimeAiringNote(malId) {
   try {
+    const viaAniList = await fetchAniListNextEpisodeByMalId(malId);
+    if (viaAniList) {
+      const d = new Date(Date.now() + viaAniList.days * 24 * 60 * 60 * 1000);
+      return `Next episode: ${formatDateGr(d.toISOString().slice(0, 10))}`;
+    }
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}`, 2, 500);
     if (!res.ok) return null;
     const data = await res.json();
@@ -640,6 +644,28 @@ function daysUntilWeekday(dayName) {
 // Checks each in-progress / planned library item for a known upcoming episode or
 // release date. Fetched live each time the Upcoming view opens rather than cached —
 // air dates shift often enough that a stale countdown would be misleading.
+// AniList's schema lets you query a Media entry directly by its MAL id (idMal) and
+// exposes nextAiringEpisode as a precise Unix timestamp — a real scheduled date/time,
+// not a guess built from a weekday name the way Jikan's broadcast field is. Used as
+// the primary source for "when's the next episode", with Jikan as a fallback.
+async function fetchAniListNextEpisodeByMalId(malId) {
+  try {
+    const query = `query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { nextAiringEpisode { airingAt episode } } }`;
+    const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ query, variables: { idMal: Number(malId) } }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const media = data.data && data.data.Media;
+    const next = media && media.nextAiringEpisode;
+    if (!next || !next.airingAt) return null;
+    const days = Math.ceil((next.airingAt * 1000 - Date.now()) / (1000 * 60 * 60 * 24));
+    return { days: Math.max(0, days), episode: next.episode };
+  } catch (e) { return null; }
+}
+
 async function checkOneUpcoming(it) {
   if (!it.externalId) return null;
   const dbId = it.externalId.split('-').slice(1).join('-');
@@ -686,6 +712,12 @@ async function checkOneUpcoming(it) {
       animeDbId = await resolveJikanIdForAnime({ externalId: animeExternalId, title: it.title });
       if (!animeDbId) return null;
     }
+    // Try the precise AniList timestamp first — more reliable than Jikan's
+    // broadcast-weekday guess, and this is exactly the check that kept
+    // inconsistently showing/missing airing anime before.
+    const viaAniList = await fetchAniListNextEpisodeByMalId(animeDbId);
+    if (viaAniList) return { item: it, days: viaAniList.days, label: 'New episode' };
+
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${animeDbId}`, 1, 600);
     if (!res.ok) return null;
     const data = await res.json();
