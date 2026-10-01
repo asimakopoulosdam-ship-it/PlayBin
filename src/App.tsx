@@ -3293,10 +3293,11 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
           // here previously broke titles where the colon is part of the name
           // itself rather than a season separator (e.g. "Re:Zero" became just "Re").
           const results = await searchAnimeDB(form.title);
-          const fresh = results.find(r =>
+          const candidates = results.filter(r =>
             key && franchiseGroupKeyForTitle(r.title) === key &&
             r.mergedAnimeIds && r.mergedAnimeIds.length > form.mergedAnimeIds.length
           );
+          const fresh = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
           if (fresh && !cancelled) {
             const updated = {
               ...form,
