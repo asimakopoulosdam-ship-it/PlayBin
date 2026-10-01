@@ -601,7 +601,7 @@ async function fetchSimilarTitles(item) {
         ? animeDbId
         : await resolveJikanIdForAnime({ externalId: animeExternalId, title: item.title, year: item.year });
       if (!jikanId) return [];
-      const res = await fetch(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`);
+      const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`, 2, 500);
       if (!res.ok) return [];
       const data = await res.json();
       const raw = (data.data || []).slice(0, 8).map(r => ({
@@ -2142,7 +2142,21 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
       jikanIdPromise.then(async malId => {
         if (!malId || cancelled) return;
         await new Promise(r => setTimeout(r, 400)); // let the seasons/recommendations calls above clear first
-        fetchAnimeAiringNote(malId).then(note => { if (!cancelled && note) setDetail(d => ({ ...d, extraNote: note })); }).catch(() => {});
+        fetchAnimeAiringNote(malId).then(note => {
+          if (cancelled || !note) return;
+          setDetail(d => {
+            // A fresh "Next episode"/"Premieres" note means this is actively airing
+            // or hasn't started — directly contradicts a 'finished'-style statusText
+            // the original source may have had wrong or stale. Only correct it in
+            // that direction; a genuine "finished airing" note doesn't need to
+            // override whatever the source already said.
+            let statusText = d.statusText;
+            if ((note.startsWith('Next episode:') || note.startsWith('Premieres:')) && statusText && /finish/i.test(statusText)) {
+              statusText = note.startsWith('Premieres:') ? 'Not yet aired' : 'Currently airing';
+            }
+            return { ...d, extraNote: note, statusText };
+          });
+        }).catch(() => {});
       });
     }
     return () => { cancelled = true; };
@@ -2859,6 +2873,23 @@ function MyShowsScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, on
     }
     if (requestId === upcomingRequestIdRef.current) setLoadingUpcoming(false);
   };
+
+  // Populates the Finished/Continue badges for every series and anime automatically,
+  // without the person needing to open Upcoming or each item by hand first. Reuses
+  // the exact same batched, cached, rate-limit-safe check Upcoming itself uses —
+  // this doesn't add a second, separate way of hitting the APIs, just runs that
+  // same safe path once in the background when My Shows is opened. Items already
+  // cached resolve instantly and cost nothing; only genuinely new/expired ones do
+  // any real work, a few at a time.
+  useEffect(() => {
+    const candidates = items.filter(i =>
+      (i.type === 'series' || i.type === 'anime') &&
+      (i.status === 'watching' || i.status === 'planned' || i.status === 'completed')
+    );
+    if (candidates.length === 0) return;
+    // Side effect only (populating the cache) — the returned list itself isn't used here.
+    fetchUpcomingForItems(candidates).catch(() => {});
+  }, []);
 
   return (
     <div className="screen">
