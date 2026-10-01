@@ -1174,7 +1174,12 @@ async function mergeAnimeSeasonEntries(animeList) {
     // TV and ONA (Netflix-original releases, e.g. Baki) both count as "real seasons"
     // eligible for merging. Movies, OVAs, Specials, and Music videos stay excluded —
     // those are side content that shouldn't get swallowed into the main season list.
-    const isEligible = !r.subtype || ['TV', 'ONA'].includes(String(r.subtype).toUpperCase());
+    // A handful of one-off announcement/teaser shorts (e.g. Re:Zero's "Memory Snow
+    // Announcement") are still tagged TV format on some sources despite being a
+    // single-episode special, not a real season — excluding anything with exactly
+    // 1 known episode catches those without needing a title-by-title list.
+    const isEligible = (!r.subtype || ['TV', 'ONA'].includes(String(r.subtype).toUpperCase()))
+      && (r.episodes == null || r.episodes > 1);
     if (!isEligible) return;
     const key = franchiseGroupKeyForTitle(r.title);
     if (!key) return;
@@ -3224,9 +3229,15 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       if (form.type === 'series' && dbId) {
         fetchSeriesDetail(dbId).then(d => { if (!cancelled && d.extraNote) setAiringNote(d.extraNote); }).catch(() => {});
       } else if (form.type === 'anime' && form.externalId) {
-        (form.externalId.startsWith('jikan-')
-          ? Promise.resolve(form.externalId.replace('jikan-', ''))
-          : resolveJikanIdForAnime(form)
+        // For a merged multi-season entry, form.externalId is the EARLIEST season —
+        // the latest one (last in the merged list) is the one whose airing status
+        // actually matters, same reasoning as the Upcoming check elsewhere.
+        const latestExternalId = (form.mergedAnimeIds && form.mergedAnimeIds.length > 1)
+          ? form.mergedAnimeIds[form.mergedAnimeIds.length - 1]
+          : form.externalId;
+        (latestExternalId.startsWith('jikan-')
+          ? Promise.resolve(latestExternalId.replace('jikan-', ''))
+          : resolveJikanIdForAnime({ externalId: latestExternalId, title: form.title })
         ).then(malId => malId ? fetchAnimeAiringNote(malId) : null)
           .then(note => { if (!cancelled && note) setAiringNote(note); }).catch(() => {});
       }
@@ -3256,6 +3267,40 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
       fetchMovieDetail(dbId).then(detail => {
         if (!cancelled && detail.runtimeMinutes) setAndPersist('movieMinutes', detail.runtimeMinutes);
       }).catch(() => {});
+      return () => { cancelled = true; };
+    }
+  }, [form.id]);
+
+  // A merged anime's season list is frozen at the moment it was added — if the
+  // franchise gets a new season on the database afterwards (e.g. Re:Zero going
+  // from 4 merged seasons to 6+ once new ones air), this item never found out and
+  // kept reporting stale info (wrong episode totals, "finished airing" for a show
+  // that's actually still going). Re-running the same franchise search Discover
+  // already does picks up anything new and silently updates the stored merge list.
+  useEffect(() => {
+    if (isFromDb && form.type === 'anime' && form.mergedAnimeIds && form.mergedAnimeIds.length > 1) {
+      let cancelled = false;
+      (async () => {
+        try {
+          const key = franchiseGroupKeyForTitle(form.title);
+          const baseQuery = form.title.split(':')[0].replace(/\s+(season\s*)?\d+$/i, '').trim();
+          const results = await searchAnimeDB(baseQuery);
+          const fresh = results.find(r =>
+            key && franchiseGroupKeyForTitle(r.title) === key &&
+            r.mergedAnimeIds && r.mergedAnimeIds.length > form.mergedAnimeIds.length
+          );
+          if (fresh && !cancelled) {
+            const updated = {
+              ...form,
+              mergedAnimeIds: fresh.mergedAnimeIds,
+              mergedAnimeMeta: fresh.mergedAnimeMeta,
+              seasonCount: fresh.seasonCount,
+            };
+            setForm(updated);
+            persistNow(updated);
+          }
+        } catch (e) { /* best-effort — stale data just stays as-is until next open */ }
+      })();
       return () => { cancelled = true; };
     }
   }, [form.id]);
