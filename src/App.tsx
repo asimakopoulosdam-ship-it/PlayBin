@@ -1253,7 +1253,8 @@ async function resolveFranchiseEnrichment(key, item) {
       const base = colonIdx > 3 ? item.title.slice(0, colonIdx) : item.title;
       const query = base.replace(/\s+(season\s*)?\d+$/i, '').trim();
       const searchResults = await searchAnimeDB(query);
-      const fullMatch = searchResults.find(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
+      const candidates = searchResults.filter(r => franchiseGroupKeyForTitle(r.title) === key && r.mergedAnimeIds && r.mergedAnimeIds.length > 1);
+      const fullMatch = candidates.sort((a, b) => b.mergedAnimeIds.length - a.mergedAnimeIds.length)[0];
       return fullMatch || null;
     } catch (e) { return null; }
   })();
