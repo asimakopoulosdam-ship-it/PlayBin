@@ -1,19 +1,29 @@
 // Save this file as: api/resolve-anime-id.js  (inside the "api" folder at your project root)
 //
 // Resolves a Kitsu/AniList anime id (or a plain title) to its real MyAnimeList id,
-// cached PERMANENTLY in Vercel KV. This mapping never changes once an anime exists
-// on MAL — "Black Torch" (Kitsu) always maps to the same MAL id — so once resolved
-// successfully for ANY user, every future lookup for that same anime (by any user,
-// forever) is served instantly from cache with zero live calls. This is exactly the
-// lookup chain that was causing the worst, most visible problems throughout
-// development: it's what "You might also like", the voice cast (now removed), the
-// merged-season refresh, and the Upcoming next-episode check all depend on for any
-// anime that wasn't found via Jikan directly.
+// cached in Vercel KV (effectively permanently for a real match — this mapping never
+// changes). "You might also like", the merged-season refresh, and the Upcoming
+// next-episode check all depend on this for any anime not found via Jikan directly.
 //
 // Query params:
 //   ?source=kitsu&id=12345       — resolve via Kitsu's own MAL mapping
 //   ?source=anilist&id=12345     — resolve via AniList's idMal field
-//   ?title=Some+Title&year=2021  — last-resort fuzzy title search on AniList
+//   ?title=Some+Title&year=2021  — last-resort title search on AniList
+//
+// FIXES:
+//  - Negative cache actually works now. Storing `null` in KV is indistinguishable
+//    from "key doesn't exist", so every miss was re-fetched live every time. A miss is
+//    now stored as the string "none".
+//  - A FAILED lookup (429 / timeout / 5xx) is no longer cached as "no MAL id". It
+//    returns 502 so the app falls back to its direct lookup, and nothing is cached.
+//  - Title search no longer guesses. It used to fall back to "first search hit",
+//    which could map a show to a completely different anime and cache that wrong id
+//    for a year (wrong episode dates, wrong recommendations, for everyone). Now it
+//    only accepts a real title match.
+//  - Title cache key includes the year (remakes with the same title no longer share
+//    one answer).
+//  - Cache prefix bumped to v2 so wrong mappings cached by the old guessing logic are
+//    ignored immediately.
 
 async function getKv() {
   try {
@@ -22,7 +32,10 @@ async function getKv() {
   } catch (e) { return null; }
 }
 
-const CACHE_SECONDS = 60 * 60 * 24 * 365; // effectively permanent — this mapping doesn't change
+const CACHE_PREFIX = 'resolve-anime-id:v2:';
+const CACHE_SECONDS = 60 * 60 * 24 * 365; // real match: effectively permanent
+const CACHE_SECONDS_MISS = 60 * 60 * 24; // confirmed "no MAL entry": re-check daily
+const MISS = 'none';
 
 async function fetchWithRetry(url, retries = 1, delayMs = 500, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -37,83 +50,110 @@ async function fetchWithRetry(url, retries = 1, delayMs = 500, options) {
   }
 }
 
-async function resolveViaKitsuMapping(kitsuId) {
-  const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/mappings`, 1, 500);
-  if (!res.ok) return null;
-  const data = await res.json();
-  const list = data.data || [];
-  const malMapping = list.find(m => m.attributes && m.attributes.externalSite === 'myanimelist/anime');
-  return (malMapping && malMapping.attributes.externalId) ? String(malMapping.attributes.externalId) : null;
-}
-
-async function resolveViaAniListId(anilistId) {
-  const query = `query ($id: Int) { Media(id: $id, type: ANIME) { idMal } }`;
-  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  const idMal = data.data && data.data.Media && data.data.Media.idMal;
-  return idMal ? String(idMal) : null;
-}
-
 function normalizeTitle(t) {
   return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 }
 
-async function resolveViaTitleSearch(title, year) {
-  const query = `query ($search: String) { Page(page: 1, perPage: 5) { media(search: $search, type: ANIME) { idMal title { romaji english } startDate { year } } } }`;
-  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 600, {
+// Every resolver returns { ok, malId }. ok=false = the request failed (unknown);
+// ok=true with malId=null = the source answered and there is no MAL entry.
+
+async function resolveViaKitsuMapping(kitsuId) {
+  try {
+    const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/mappings`, 1, 500);
+    if (!res) return { ok: false, malId: null };
+    if (res.status === 404) return { ok: true, malId: null };
+    if (!res.ok) return { ok: false, malId: null };
+    const data = await res.json();
+    const list = data.data || [];
+    const malMapping = list.find(m => m.attributes && m.attributes.externalSite === 'myanimelist/anime');
+    const malId = (malMapping && malMapping.attributes.externalId) ? String(malMapping.attributes.externalId) : null;
+    return { ok: true, malId };
+  } catch (e) { return { ok: false, malId: null }; }
+}
+
+async function anilistQuery(query, variables) {
+  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ query, variables: { search: title } }),
+    body: JSON.stringify({ query, variables }),
   });
-  if (!res.ok) return null;
-  const data = await res.json();
-  const list = (data.data && data.data.Page && data.data.Page.media) || [];
-  if (list.length === 0) return null;
-  const nq = normalizeTitle(title);
-  let best = year && list.find(a => a.startDate && a.startDate.year === Number(year));
-  if (!best) best = list.find(a => normalizeTitle(a.title.english || a.title.romaji) === nq);
-  if (!best) best = list[0];
-  return (best && best.idMal) ? String(best.idMal) : null;
+  return res;
+}
+
+async function resolveViaAniListId(anilistId) {
+  try {
+    const res = await anilistQuery(`query ($id: Int) { Media(id: $id, type: ANIME) { idMal } }`, { id: Number(anilistId) });
+    if (!res) return { ok: false, malId: null };
+    if (res.status === 404) return { ok: true, malId: null };
+    if (!res.ok) return { ok: false, malId: null };
+    const data = await res.json();
+    const idMal = data.data && data.data.Media && data.data.Media.idMal;
+    return { ok: true, malId: idMal ? String(idMal) : null };
+  } catch (e) { return { ok: false, malId: null }; }
+}
+
+async function resolveViaTitleSearch(title, year) {
+  try {
+    const query = `query ($search: String) { Page(page: 1, perPage: 8) { media(search: $search, type: ANIME) { idMal title { romaji english } synonyms startDate { year } } } }`;
+    const res = await anilistQuery(query, { search: title });
+    if (!res || !res.ok) return { ok: false, malId: null };
+    const data = await res.json();
+    const list = ((data.data && data.data.Page && data.data.Page.media) || []).filter(a => a.idMal);
+    const nq = normalizeTitle(title);
+    const namesOf = a => [a.title.english, a.title.romaji, ...(a.synonyms || [])].map(normalizeTitle).filter(Boolean);
+    const sameYear = a => year && a.startDate && a.startDate.year === Number(year);
+
+    // 1) exact title match (any of english / romaji / synonyms), preferring same year
+    const exact = list.filter(a => namesOf(a).includes(nq));
+    let best = exact.find(sameYear) || exact[0];
+    // 2) otherwise, only a close title match that ALSO aired the same year
+    if (!best && year && nq.length >= 4) {
+      best = list.find(a => sameYear(a) && namesOf(a).some(n => n.length >= 4 && (n.includes(nq) || nq.includes(n))));
+    }
+    // No confident match = no answer. Guessing is what caused wrong mappings before.
+    return { ok: true, malId: best ? String(best.idMal) : null };
+  } catch (e) { return { ok: false, malId: null }; }
 }
 
 export default async function handler(req, res) {
   const { source, id, title, year } = req.query;
-  if (!['kitsu', 'anilist'].includes(source) && !title) {
+  const bySource = ['kitsu', 'anilist'].includes(source);
+  if (bySource && !/^\d+$/.test(String(id || ''))) {
+    return res.status(400).json({ error: 'Missing or invalid id' });
+  }
+  if (!bySource && !title) {
     return res.status(400).json({ error: 'Provide source+id (kitsu|anilist) or title' });
   }
 
-  const cacheKey = title ? `resolve-anime-id:title:${title.toLowerCase().trim()}` : `resolve-anime-id:${source}:${id}`;
+  const cacheKey = bySource
+    ? `${CACHE_PREFIX}${source}:${id}`
+    : `${CACHE_PREFIX}title:${normalizeTitle(title)}:${year || ''}`;
   const kv = await getKv();
 
   if (kv) {
     try {
       const cached = await kv.get(cacheKey);
-      if (cached !== null && cached !== undefined) {
-        return res.status(200).json({ malId: cached || null, cached: true });
+      if (cached === MISS) return res.status(200).json({ malId: null, cached: true });
+      if (cached !== null && cached !== undefined && cached !== '') {
+        return res.status(200).json({ malId: String(cached), cached: true });
       }
     } catch (e) { /* fall through to live */ }
   }
 
-  let malId = null;
-  try {
-    if (source === 'kitsu') malId = await resolveViaKitsuMapping(id);
-    else if (source === 'anilist') malId = await resolveViaAniListId(id);
-    else malId = await resolveViaTitleSearch(title, year);
-  } catch (e) { /* malId stays null */ }
+  let result;
+  if (source === 'kitsu') result = await resolveViaKitsuMapping(id);
+  else if (source === 'anilist') result = await resolveViaAniListId(id);
+  else result = await resolveViaTitleSearch(title, year);
+
+  if (!result.ok) {
+    return res.status(502).json({ error: 'Lookup source unavailable right now' });
+  }
 
   if (kv) {
     try {
-      // Cache the miss too (a short-lived one) so a genuinely unmappable anime
-      // doesn't get hammered repeatedly either, same idea as the client-side
-      // negative caching already in place for the Upcoming check.
-      await kv.set(cacheKey, malId, { ex: malId ? CACHE_SECONDS : 60 * 60 * 24 });
+      await kv.set(cacheKey, result.malId || MISS, { ex: result.malId ? CACHE_SECONDS : CACHE_SECONDS_MISS });
     } catch (e) { /* not fatal */ }
   }
 
-  return res.status(200).json({ malId, cached: false });
+  return res.status(200).json({ malId: result.malId, cached: false });
 }
