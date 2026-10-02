@@ -3435,8 +3435,16 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
     if (isFromDb && form.type !== 'movie' && dbId) {
       let cancelled = false;
       setLoadingSeasons(true);
-      fetchSeasonsFor(form).then(r => { if (!cancelled) setSeasons(r); })
-        .catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
+      fetchSeasonsFor(form).then(r => {
+        if (cancelled) return;
+        setSeasons(r);
+        // The real total across every season — the stored totalEpisodes could be
+        // stale (e.g. just one season's count from before this was a merged entry,
+        // or from before a newer season was discovered), showing something like
+        // "25 ep" in My Shows' list when the real total is 188.
+        const realTotal = (r || []).reduce((sum, s) => sum + (s.episodes ? s.episodes.length : 0), 0);
+        if (realTotal > 0 && realTotal !== Number(form.totalEpisodes)) setAndPersist('totalEpisodes', realTotal);
+      }).catch(() => {}).finally(() => { if (!cancelled) setLoadingSeasons(false); });
       return () => { cancelled = true; };
     }
   }, [form.id]);
