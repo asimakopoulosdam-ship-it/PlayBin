@@ -1014,6 +1014,17 @@ async function fetchAnimeEpisodesForId(malId) {
 
 async function fetchAnimeRelations(malId) {
   try {
+    const proxyRes = await fetch(`/api/anime-relations?id=${malId}`);
+    if (proxyRes.ok) {
+      const proxyData = await proxyRes.json();
+      if (proxyData.relations && proxyData.relations.length > 0) return proxyData.relations;
+      // A genuinely empty result (not a proxy failure) means Jikan itself reported
+      // no relations — no point falling through to a direct call that would find
+      // the same nothing.
+      if (proxyData.relations) return [];
+    }
+  } catch (e) { /* proxy unreachable — fall through to the direct call below */ }
+  try {
     // No retries here on purpose: this is only used for the "merge multi-season
     // anime" enhancement, which is best-effort. If Jikan is struggling (as it is
     // during the outages this app has hit before), retrying 2-3 times per lookup
