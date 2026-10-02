@@ -660,8 +660,25 @@ async function fetchSimilarTitles(item) {
       // recommended "Kuroko no Basket 3rd Season" showed up as its own separate card
       // instead of folding into the one merged Kuroko entry. Same fix as Trending/
       // Zapping: collapse known franchises within this list too.
-      if (raw.length <= 1) return raw;
-      try { return await mergeAnimeSeasonEntries(raw); } catch (e) { return raw; }
+      let merged = raw;
+      if (raw.length > 1) {
+        try { merged = await mergeAnimeSeasonEntries(raw); } catch (e) { merged = raw; }
+      }
+      // A recommendation often appears ALONE in this list (nothing else from the
+      // same franchise happened to also be recommended), so the in-batch merge
+      // above has nothing to group it with — it stays a single old season (e.g.
+      // "Bleach" pointing at just the 2004 series, missing Thousand-Year Blood
+      // War entirely). The same background franchise search Trending/Zapping use
+      // fixes this by looking up the full merged group directly.
+      return await Promise.all(merged.map(async (r) => {
+        if (r.mergedAnimeIds && r.mergedAnimeIds.length > 1) return r;
+        const key = franchiseGroupKeyForTitle(r.title);
+        if (!key) return r;
+        try {
+          const fullMatch = await resolveFranchiseEnrichment(key, r);
+          return fullMatch || r;
+        } catch (e) { return r; }
+      }));
     }
   } catch (e) { return []; }
   return [];
