@@ -1105,6 +1105,22 @@ ANIME_FRANCHISE_OVERRIDES.forEach(chain => chain.forEach(id => ANIME_OVERRIDE_LO
 // Add a new { key, pattern } here only for franchises that keep showing up split
 // into confusing duplicate seasons; this list is intentionally short; everything
 // else still merges automatically via live Jikan relations when Jikan is reachable.
+// Some spin-offs share a franchise's exact name prefix but are NOT a real
+// continuation of the story — a different tone/format entirely (usually a 4-koma
+// gag/parody spin-off) — and would otherwise get mistakenly slotted into the
+// numbered season list (e.g. "Attack on Titan: Junior High" showing up as
+// "Season 2" between the real Season 1 and Season 2). Matched as a lowercase
+// substring of the title. Add to this list only for a confirmed case like this —
+// it's necessarily a growing exception list since there's no reliable way to tell
+// "real season" from "same-named spin-off" from metadata alone.
+const ANIME_FRANCHISE_EXCLUDED_KEYWORDS = [
+  'junior high', // Attack on Titan: Junior High — comedy/parody spin-off, not a real season
+];
+function isKnownFranchiseSpinoff(title) {
+  const t = (title || '').toLowerCase();
+  return ANIME_FRANCHISE_EXCLUDED_KEYWORDS.some(kw => t.includes(kw));
+}
+
 const ANIME_TITLE_FRANCHISE_GROUPS = [
   { key: 'bleach', pattern: /^bleach\b/i },
   { key: 'mha', pattern: /^(my hero academia|boku no hero academia)\b/i },
@@ -1307,7 +1323,8 @@ async function mergeAnimeSeasonEntries(animeList) {
     // single-episode special, not a real season — excluding anything with exactly
     // 1 known episode catches those without needing a title-by-title list.
     const isEligible = (!r.subtype || ['TV', 'ONA'].includes(String(r.subtype).toUpperCase()))
-      && (r.episodes == null || r.episodes > 1);
+      && (r.episodes == null || r.episodes > 1)
+      && !isKnownFranchiseSpinoff(r.title);
     if (!isEligible) return;
     const key = franchiseGroupKeyForTitle(r.title);
     if (!key) return;
