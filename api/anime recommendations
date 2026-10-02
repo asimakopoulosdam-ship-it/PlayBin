@@ -1,15 +1,20 @@
 // Save this file as: api/anime-recommendations.js  (inside the "api" folder at your project root)
 //
-// Caches anime recommendations (used for "You might also like") in Vercel KV for a
-// long time — this data is community-submitted and barely ever changes for a given
-// anime. Once resolved successfully for one user, every future lookup for the same
-// anime is served instantly, with zero live calls.
-//
+// Caches anime recommendations (used for "You might also like") in Vercel KV.
 // Tries Jikan (MyAnimeList) first, then falls back to AniList's own, separate
-// recommendations if Jikan has none — smaller/newer anime often have no
-// community-submitted recommendations on MAL at all yet (e.g. "Black Torch"),
-// even though the show itself is findable fine. AniList's recommendations are a
-// different, independently-submitted set, so this often fills the gap.
+// recommendations if Jikan has none — smaller/newer anime often have none on MAL
+// yet (e.g. "Black Torch").
+//
+// FIXES:
+//  - A failed lookup (429 / timeout / 5xx) is no longer treated as "no
+//    recommendations". Before, one rate-limit hit on both sources wrote an EMPTY list
+//    into the cache for 30 days, for every user.
+//  - Full 30-day cache only for real (non-empty) results. A confirmed empty result
+//    (both sources answered normally, neither had anything) is cached for 12h only.
+//    If a source failed and nothing was found, nothing is cached and the endpoint
+//    returns 502 so the app can fall back to a direct call.
+//  - Cache key bumped to v2 so entries already poisoned by the old bug (empty lists
+//    stored for 30 days) are ignored immediately instead of waiting for them to expire.
 //
 // Query params: ?id=21   (the Jikan/MAL id)
 
@@ -20,7 +25,9 @@ async function getKv() {
   } catch (e) { return null; }
 }
 
-const CACHE_SECONDS = 60 * 60 * 24 * 30; // 30 days — recommendations change rarely, but not never
+const CACHE_PREFIX = 'anime-recommendations:v2:';
+const CACHE_SECONDS = 60 * 60 * 24 * 30; // 30 days — recommendations change rarely
+const CACHE_SECONDS_EMPTY = 60 * 60 * 12; // 12h — confirmed "none anywhere", re-check later
 
 async function fetchWithRetry(url, retries = 2, delayMs = 700, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
@@ -35,38 +42,49 @@ async function fetchWithRetry(url, retries = 2, delayMs = 700, options) {
   }
 }
 
+// Each source returns { ok, results }: ok=false means the request itself failed,
+// which is NOT the same as "answered, but there are no recommendations".
 async function recommendationsFromJikan(malId) {
-  const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/recommendations`);
-  if (!res.ok) return [];
-  const data = await res.json();
-  return (data.data || []).slice(0, 8).map(r => ({
-    externalId: `jikan-${r.entry.mal_id}`,
-    title: r.entry.title,
-    posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
-  }));
+  try {
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/recommendations`);
+    if (!res || !res.ok) return { ok: false, results: [] };
+    const data = await res.json();
+    const results = (data.data || []).slice(0, 8).map(r => ({
+      externalId: `jikan-${r.entry.mal_id}`,
+      title: r.entry.title,
+      posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
+    }));
+    return { ok: true, results };
+  } catch (e) { return { ok: false, results: [] }; }
 }
 
-// AniList identifies a Media entry by its own MAL id directly (idMal), so this
-// stays keyed the same way the rest of the app already resolves anime — no second
-// id-mapping lookup needed.
+// AniList identifies a Media entry by its MAL id directly (idMal), so no second
+// id-mapping lookup is needed.
 async function recommendationsFromAniList(malId) {
   const query = `query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { recommendations(sort: RATING_DESC, perPage: 8) { nodes { mediaRecommendation { idMal title { romaji english } coverImage { large } } } } } }`;
-  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-    body: JSON.stringify({ query, variables: { idMal: Number(malId) } }),
-  });
-  if (!res.ok) return [];
-  const data = await res.json();
-  const nodes = (data.data && data.data.Media && data.data.Media.recommendations && data.data.Media.recommendations.nodes) || [];
-  return nodes
-    .map(n => n.mediaRecommendation)
-    .filter(m => m && m.idMal)
-    .map(m => ({
-      externalId: `jikan-${m.idMal}`,
-      title: m.title.english || m.title.romaji,
-      posterUrl: (m.coverImage && m.coverImage.large) || null,
-    }));
+  try {
+    const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ query, variables: { idMal: Number(malId) } }),
+    });
+    if (!res) return { ok: false, results: [] };
+    // AniList answers 404 when it simply doesn't have this anime — a real answer.
+    if (res.status === 404) return { ok: true, results: [] };
+    if (!res.ok) return { ok: false, results: [] };
+    const data = await res.json();
+    const nodes = (data.data && data.data.Media && data.data.Media.recommendations && data.data.Media.recommendations.nodes) || [];
+    const seen = new Set();
+    const results = nodes
+      .map(n => n.mediaRecommendation)
+      .filter(m => m && m.idMal && !seen.has(m.idMal) && seen.add(m.idMal))
+      .map(m => ({
+        externalId: `jikan-${m.idMal}`,
+        title: m.title.english || m.title.romaji,
+        posterUrl: (m.coverImage && m.coverImage.large) || null,
+      }));
+    return { ok: true, results };
+  } catch (e) { return { ok: false, results: [] }; }
 }
 
 export default async function handler(req, res) {
@@ -75,29 +93,35 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: 'Missing or invalid id' });
   }
 
-  const cacheKey = `anime-recommendations:${malId}`;
+  const cacheKey = `${CACHE_PREFIX}${malId}`;
   const kv = await getKv();
 
   if (kv) {
     try {
       const cached = await kv.get(cacheKey);
-      if (cached) return res.status(200).json({ results: cached, cached: true });
+      if (Array.isArray(cached)) return res.status(200).json({ results: cached, cached: true });
     } catch (e) { /* fall through to live */ }
   }
 
-  let results = [];
-  try {
-    results = await recommendationsFromJikan(malId);
-  } catch (e) { /* results stays [] */ }
+  const jikan = await recommendationsFromJikan(malId);
+  let results = jikan.results;
+  let everySourceAnswered = jikan.ok;
 
   if (results.length === 0) {
-    try {
-      results = await recommendationsFromAniList(malId);
-    } catch (e) { /* results stays [] */ }
+    const anilist = await recommendationsFromAniList(malId);
+    results = anilist.results;
+    everySourceAnswered = everySourceAnswered && anilist.ok;
+  }
+
+  if (results.length === 0 && !everySourceAnswered) {
+    // Nothing found AND at least one source failed — this is "unknown", not "none".
+    return res.status(502).json({ error: 'Recommendation sources unavailable right now' });
   }
 
   if (kv) {
-    try { await kv.set(cacheKey, results, { ex: CACHE_SECONDS }); } catch (e) { /* not fatal, even for an empty result — avoids hammering a title with genuinely no recommendations anywhere */ }
+    try {
+      await kv.set(cacheKey, results, { ex: results.length > 0 ? CACHE_SECONDS : CACHE_SECONDS_EMPTY });
+    } catch (e) { /* not fatal */ }
   }
 
   return res.status(200).json({ results, cached: false });
