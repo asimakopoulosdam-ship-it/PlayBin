@@ -1,0 +1,66 @@
+// Save this file as: api/anime-recommendations.js  (inside the "api" folder at your project root)
+//
+// Caches Jikan's anime recommendations (used for "You might also like") in Vercel
+// KV for a long time — this data is community-submitted and barely ever changes
+// for a given anime. Once resolved successfully for one user, every future lookup
+// for the same anime is served instantly, with zero live calls to Jikan.
+//
+// Query params: ?id=21   (the Jikan/MAL id)
+
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
+
+const CACHE_SECONDS = 60 * 60 * 24 * 30; // 30 days — recommendations change rarely, but not never
+
+async function fetchWithRetry(url, retries = 2, delayMs = 700) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+      if (attempt === retries) return res;
+    } catch (e) {
+      if (attempt === retries) throw e;
+    }
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+}
+
+export default async function handler(req, res) {
+  const malId = req.query.id;
+  if (!malId || !/^\d+$/.test(String(malId))) {
+    return res.status(400).json({ error: 'Missing or invalid id' });
+  }
+
+  const cacheKey = `anime-recommendations:${malId}`;
+  const kv = await getKv();
+
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) return res.status(200).json({ results: cached, cached: true });
+    } catch (e) { /* fall through to live */ }
+  }
+
+  let results = [];
+  try {
+    const liveRes = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/recommendations`);
+    if (liveRes.ok) {
+      const data = await liveRes.json();
+      results = (data.data || []).slice(0, 8).map(r => ({
+        externalId: `jikan-${r.entry.mal_id}`,
+        title: r.entry.title,
+        posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
+      }));
+    }
+  } catch (e) { /* results stays [] */ }
+
+  if (kv) {
+    try { await kv.set(cacheKey, results, { ex: CACHE_SECONDS }); } catch (e) { /* not fatal, even for an empty result — avoids hammering a title with genuinely no recommendations */ }
+  }
+
+  return res.status(200).json({ results, cached: false });
+}
