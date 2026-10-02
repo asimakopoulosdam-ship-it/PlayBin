@@ -398,17 +398,20 @@ async function resolveJikanIdViaAniList(anilistId) {
 // Last-resort fuzzy fallback for anything that isn't Kitsu/AniList-sourced, or on
 // the rare chance neither mapping had a MAL entry. Only one retry — if Jikan's
 // search is genuinely struggling, hammering it further won't help.
+// [fix-v2:title-match] Last-resort lookup (only used if our own proxy is
+// unreachable). Only accepts a real title match — it used to fall back to the first
+// search hit, which could be a completely different anime.
 async function resolveJikanIdByTitleSearch(title, year) {
   try {
-    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=5&sfw=true`, 1, 600);
+    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(title)}&limit=8&sfw=true`, 1, 600);
     if (!res.ok) return null;
     const data = await res.json();
     const list = data.data || [];
-    if (list.length === 0) return null;
     const nq = normalizeTitle(title);
-    let best = year && list.find(a => a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year));
-    if (!best) best = list.find(a => normalizeTitle(a.title_english || a.title) === nq);
-    if (!best) best = list[0];
+    const namesOf = a => [a.title, a.title_english, ...((a.titles || []).map(t => t.title))].map(normalizeTitle).filter(Boolean);
+    const exact = list.filter(a => namesOf(a).includes(nq));
+    const sameYear = a => year && a.aired && a.aired.from && a.aired.from.slice(0, 4) === String(year);
+    const best = exact.find(sameYear) || exact[0];
     return best ? String(best.mal_id) : null;
   } catch (e) { return null; }
 }
@@ -991,7 +994,10 @@ async function fetchAnimeEpisodesForId(malId) {
     const res = await fetch(`/api/anime-episodes?id=${malId}`);
     if (res.ok) {
       const data = await res.json();
-      if (data.episodes && data.episodes.length > 0) return data.episodes;
+      // [fix-v2:episodes] The proxy now fills in aired episodes MAL hasn't listed
+      // (via AniList), so an empty list from it is a real answer (e.g. not aired
+      // yet) — no point re-asking Jikan directly for the same nothing.
+      if (Array.isArray(data.episodes)) return data.episodes;
     }
   } catch (e) { /* proxy unreachable — fall back to the direct path below */ }
 
@@ -1012,30 +1018,24 @@ async function fetchAnimeEpisodesForId(malId) {
   return all;
 }
 
+// [fix-v2:relations] Returns the relations list, [] for a confirmed "no relations",
+// or null when the lookup itself failed. The chain-walk below needs to tell those
+// apart: a failed lookup must not be remembered as a finished (but incomplete) chain.
 async function fetchAnimeRelations(malId) {
   try {
     const proxyRes = await fetch(`/api/anime-relations?id=${malId}`);
     if (proxyRes.ok) {
       const proxyData = await proxyRes.json();
-      if (proxyData.relations && proxyData.relations.length > 0) return proxyData.relations;
-      // A genuinely empty result (not a proxy failure) means Jikan itself reported
-      // no relations — no point falling through to a direct call that would find
-      // the same nothing.
-      if (proxyData.relations) return [];
+      if (Array.isArray(proxyData.relations)) return proxyData.relations;
     }
+    // Not ok (502 = Jikan failed upstream) — fall through to one direct attempt.
   } catch (e) { /* proxy unreachable — fall through to the direct call below */ }
   try {
-    // No retries here on purpose: this is only used for the "merge multi-season
-    // anime" enhancement, which is best-effort. If Jikan is struggling (as it is
-    // during the outages this app has hit before), retrying 2-3 times per lookup
-    // would stack up into many seconds of dead time and make search feel frozen.
-    // Failing instantly here just means that one franchise doesn't get merged —
-    // search itself stays fast either way.
     const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/relations`, 0);
-    if (!res.ok) return [];
+    if (!res.ok) return null;
     const data = await res.json();
     return data.data || [];
-  } catch (e) { return []; }
+  } catch (e) { return null; }
 }
 
 // Minimal single-anime lookup used only to order merged seasons chronologically and
@@ -1267,23 +1267,28 @@ const animeMergeChainCache = new Map(); // malId (string) -> Promise<string[]>
 async function fetchAnimeMergeChainIds(malId) {
   const startId = String(malId);
 
-  // Only real Jikan/MAL ids are plain numbers. Anime results that came from the
-  // AniList or Kitsu fallback (used when Jikan itself is down) carry ids like
-  // "anilist-269" or "kitsu-269" — those simply don't get merged this way (title
-  // grouping above handles the known cases instead); everything else about them
-  // (poster, title, add-to-library) still works normally.
+  // Only real Jikan/MAL ids are plain numbers. Kitsu/AniList-sourced results
+  // ("kitsu-269", "anilist-269") don't get merged this way — title grouping handles
+  // the known cases instead.
   if (!/^\d+$/.test(startId)) return [startId];
 
   if (ANIME_OVERRIDE_LOOKUP.has(startId)) return ANIME_OVERRIDE_LOOKUP.get(startId);
 
   if (animeMergeChainCache.has(startId)) return animeMergeChainCache.get(startId);
 
-  const promise = (async () => {
+  // [fix-v2:chain] Tracks whether any relations lookup failed during the walk. A
+  // partial chain is still returned (better than nothing for this search), but it is
+  // NOT kept in the session cache — otherwise every later search in the same session
+  // (including the ItemModal's 4-second retry) got the same incomplete chain back
+  // forever and never tried again.
+  const walk = (async () => {
     const seen = new Set([startId]);
     const queue = [startId];
+    let incomplete = false;
     while (queue.length > 0) {
       const current = queue.shift();
       const relations = await fetchAnimeRelations(current);
+      if (relations === null) { incomplete = true; continue; }
       const relatedIds = relations
         .filter(r => r.relation === 'Sequel' || r.relation === 'Prequel')
         .flatMap(r => (r.entry || []).filter(e => e.type === 'anime'))
@@ -1292,12 +1297,18 @@ async function fetchAnimeMergeChainIds(malId) {
         if (!seen.has(id)) { seen.add(id); queue.push(id); }
       }
     }
-    return Array.from(seen);
+    return { ids: Array.from(seen), incomplete };
   })();
 
+  const promise = walk.then(r => r.ids);
   animeMergeChainCache.set(startId, promise);
-  promise.then(ids => { ids.forEach(id => { if (!animeMergeChainCache.has(id)) animeMergeChainCache.set(id, promise); }); })
-    .catch(() => {});
+  walk.then(({ ids, incomplete }) => {
+    if (incomplete) {
+      animeMergeChainCache.forEach((p, id) => { if (p === promise) animeMergeChainCache.delete(id); });
+    } else {
+      ids.forEach(id => { if (!animeMergeChainCache.has(id)) animeMergeChainCache.set(id, promise); });
+    }
+  }).catch(() => { animeMergeChainCache.delete(startId); });
   return promise;
 }
 
@@ -1389,6 +1400,23 @@ async function mergeAnimeSeasonEntries(animeList) {
 // season, ordered by air date, each kept as its own clearly-labeled season rather
 // than blended together — this is what makes "Season 1 / Season 2 / Season 3" show
 // up correctly instead of the old year-grouping confusion.
+// [fix-v2:new-season] A one-episode entry is usually a bonus/announcement special
+// swept into a merge (e.g. Mob Psycho 100's "Reigen") — but it's ALSO exactly what a
+// brand-new season looks like the week its first episode airs. Dropping every
+// 1-episode entry hid the newest season right when it mattered most. Now a single
+// episode only counts as a special if it's old.
+const NEW_SEASON_GRACE_DAYS = 21;
+function isRealSeasonEpisodeList(eps) {
+  if (!eps || eps.length === 0) return false;
+  if (eps.length > 1) return true;
+  const ep = eps[0];
+  if (ep.recent) return true; // flagged by api/anime-episodes.js: belongs to an anime airing right now
+  if (!ep.airdate) return false;
+  const aired = new Date(ep.airdate).getTime();
+  if (isNaN(aired)) return false;
+  return Date.now() - aired <= NEW_SEASON_GRACE_DAYS * 24 * 60 * 60 * 1000;
+}
+
 async function fetchAnimeSeasonsMerged(malIds) {
   const infos = (await Promise.all(malIds.map(id => fetchAnimeBasicInfo(id)))).filter(Boolean);
   const ordered = infos.sort((a, b) => {
@@ -1403,17 +1431,11 @@ async function fetchAnimeSeasonsMerged(malIds) {
   for (const info of ordered) {
     let eps = [];
     try { eps = await fetchAnimeEpisodesForId(info.malId); } catch (e) { eps = []; }
-    // A real episode count of exactly 1 is almost always a one-off bonus/
-    // announcement episode that got swept into the merge (e.g. Mob Psycho 100's
-    // single-episode "Reigen" entry) — the episode-count check at merge time
-    // often can't catch this, since that count is frequently null/unknown until
-    // the real episode list is actually fetched, which is only here.
-    if (eps.length <= 1) continue;
+    if (!isRealSeasonEpisodeList(eps)) continue;
     seasons.push({
       seasonNumber: seasonNum,
       seasonTitle: info.title,
-      // Prefixed with the source malId so episode ids never collide across seasons
-      // that came from different underlying Jikan entries.
+      // Prefixed with the source malId so episode ids never collide across seasons.
       episodes: eps.map(e => ({ ...e, id: `${info.malId}-${e.id}` })),
     });
     seasonNum++;
@@ -1421,19 +1443,28 @@ async function fetchAnimeSeasonsMerged(malIds) {
   return seasons;
 }
 
+// [fix-v2:seasons-by-year] Episodes without an air date are almost always the newest
+// ones (MAL hasn't filled in their details yet, or they were added from AniList's
+// aired count), so they join the latest year instead of a separate "Unscheduled"
+// group. If nothing has a date at all, everything is one plain season.
 async function fetchAnimeSeasons(malId) {
   const all = await fetchAnimeEpisodesForId(malId);
 
   const byYear = {};
+  const undated = [];
   all.forEach(e => {
-    const year = e.airdate ? e.airdate.slice(0, 4) : 'unscheduled';
-    if (!byYear[year]) byYear[year] = [];
-    byYear[year].push(e);
+    if (e.airdate) {
+      const year = e.airdate.slice(0, 4);
+      if (!byYear[year]) byYear[year] = [];
+      byYear[year].push(e);
+    } else {
+      undated.push(e);
+    }
   });
-  const years = Object.keys(byYear).filter(y => y !== 'unscheduled').sort((a, b) => a - b);
-  const seasons = years.map(y => ({ seasonNumber: y, episodes: byYear[y] }));
-  if (byYear.unscheduled) seasons.push({ seasonNumber: 'Unscheduled', episodes: byYear.unscheduled });
-  return seasons;
+  const years = Object.keys(byYear).sort((a, b) => a - b);
+  if (years.length === 0) return undated.length > 0 ? [{ seasonNumber: 1, episodes: undated }] : [];
+  byYear[years[years.length - 1]].push(...undated);
+  return years.map(y => ({ seasonNumber: y, episodes: byYear[y] }));
 }
 
 // Kitsu — used for anime items that were found via the Kitsu fallback (when Jikan
@@ -1537,22 +1568,17 @@ async function fetchAnimeSeasonsAcrossSources(members) {
     } catch (e) { return { member: m, subSeasons: [] }; }
   }));
 
+  // [fix-v2:new-season] same 1-episode rule as fetchAnimeSeasonsMerged (see
+  // isRealSeasonEpisodeList) — keeps a season that just started airing.
   const flattened = [];
   perMember.forEach(({ member, subSeasons }) => {
     if (!subSeasons || subSeasons.length === 0) return;
     if (subSeasons.length === 1) {
-      // A real episode count of exactly 1 is almost always a one-off bonus/
-      // announcement episode swept into the merge, not a real season — only
-      // catchable here, once the actual episode list is in hand (the episode
-      // count at merge-decision time is frequently null/unknown).
-      if ((subSeasons[0].episodes || []).length <= 1) return;
+      if (!isRealSeasonEpisodeList(subSeasons[0].episodes)) return;
       flattened.push({ seasonTitle: member.title, episodes: subSeasons[0].episodes });
     } else {
-      // The member itself already split into multiple year-based groups (e.g. a
-      // very long-running original series) — keep those, just labeled under this
-      // season's own name too so it's clear which part of the franchise they're in.
       subSeasons.forEach(s => {
-        if ((s.episodes || []).length <= 1) return;
+        if (!isRealSeasonEpisodeList(s.episodes)) return;
         flattened.push({ seasonTitle: `${member.title} — ${seasonLabel(s)}`, episodes: s.episodes });
       });
     }
