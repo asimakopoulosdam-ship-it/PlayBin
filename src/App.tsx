@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import ReactDOM from 'react-dom';
 import {
   Tv2, Clapperboard, Sparkles, LayoutList, Search, CircleUserRound,
   Plus, X, Star, Clock3, CheckCircle2, PlayCircle, ArrowLeft, Trash2,
@@ -72,6 +73,10 @@ if (SUPABASE_CONFIGURED) {
 /* ---------------------------------- generic helpers ---------------------------------- */
 
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+
+function Portal({ children }) {
+  return typeof document !== 'undefined' ? ReactDOM.createPortal(children, document.body) : null;
+}
 
 // Any modal/bottom-sheet calls this on mount. Without it, a touch that starts on the
 // sheet can end up scrolling the page behind it too (iOS Safari's default behavior),
@@ -2338,12 +2343,14 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
         )}
 
         {activePerson && (
-          <PersonFilmographySheet
-            person={activePerson}
-            onClose={() => setActivePerson(null)}
-            items={items}
-            onOpenResult={(r) => { setActivePerson(null); onOpenResult(r); }}
-          />
+          <Portal>
+            <PersonFilmographySheet
+              person={activePerson}
+              onClose={() => setActivePerson(null)}
+              items={items}
+              onOpenResult={(r) => { setActivePerson(null); onOpenResult(r); }}
+            />
+          </Portal>
         )}
       </div>
     </div>
@@ -2880,16 +2887,18 @@ function TypeSearchSheet({ type, items, onClose, onQuickAdd, onOpenEpisodes, onD
       </div>
 
       {activeResult && (
-        <ResultDetailSheet
-          key={activeResult.externalId}
-          result={activeResult}
-          items={items}
-          onClose={closeResult}
-          onAdd={handleAdd}
-          onOpenEpisodes={onOpenEpisodes}
-          onQuickAdd={onQuickAdd}
-          onOpenResult={openResult}
-        />
+        <Portal>
+          <ResultDetailSheet
+            key={activeResult.externalId}
+            result={activeResult}
+            items={items}
+            onClose={closeResult}
+            onAdd={handleAdd}
+            onOpenEpisodes={onOpenEpisodes}
+            onQuickAdd={onQuickAdd}
+            onOpenResult={openResult}
+          />
+        </Portal>
       )}
     </div>
   );
@@ -3738,25 +3747,29 @@ function ItemModal({ draft, onClose, onSave, onSilentSave, onDelete, onOpenEpiso
         )}
 
         {activeSimilarResult && (
-          <ResultDetailSheet
-            key={activeSimilarResult.externalId}
-            result={activeSimilarResult}
-            items={items || []}
-            onClose={closeSimilarResult}
-            onAdd={(detail, status) => { onQuickAdd(detail, status); setSimilarStack([]); }}
-            onOpenEpisodes={onOpenEpisodes}
-            onQuickAdd={onQuickAdd}
-            onOpenResult={openSimilarResult}
-          />
+          <Portal>
+            <ResultDetailSheet
+              key={activeSimilarResult.externalId}
+              result={activeSimilarResult}
+              items={items || []}
+              onClose={closeSimilarResult}
+              onAdd={(detail, status) => { onQuickAdd(detail, status); setSimilarStack([]); }}
+              onOpenEpisodes={onOpenEpisodes}
+              onQuickAdd={onQuickAdd}
+              onOpenResult={openSimilarResult}
+            />
+          </Portal>
         )}
 
         {activePerson && (
-          <PersonFilmographySheet
-            person={activePerson}
-            onClose={() => setActivePerson(null)}
-            items={items || []}
-            onOpenResult={(r) => { setActivePerson(null); openSimilarResult(r); }}
-          />
+          <Portal>
+            <PersonFilmographySheet
+              person={activePerson}
+              onClose={() => setActivePerson(null)}
+              items={items || []}
+              onOpenResult={(r) => { setActivePerson(null); openSimilarResult(r); }}
+            />
+          </Portal>
         )}
       </div>
     </div>
