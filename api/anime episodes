@@ -1,0 +1,105 @@
+// Save this file as: api/anime-episodes.js  (inside the "api" folder at your project root)
+//
+// Caches a Jikan anime's full episode list (assembled across however many pages it
+// takes) in Vercel KV. Episode lists for a FINISHED anime never change at all —
+// cached effectively permanently. For a still-airing anime, new episodes get added
+// periodically, so those get a much shorter cache window instead, re-checking live
+// often enough to pick up new episodes promptly without re-fetching a 1000-episode
+// back catalog every time.
+//
+// Query params: ?id=21   (the Jikan/MAL id)
+
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
+
+const CACHE_SECONDS_FINISHED = 60 * 60 * 24 * 365; // effectively permanent
+const CACHE_SECONDS_AIRING = 60 * 60 * 12; // 12 hours — new episodes should show up reasonably fast
+
+async function fetchWithRetry(url, retries = 2, delayMs = 900) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url);
+      if (res.ok) return res;
+      if (attempt === retries) return res;
+    } catch (e) {
+      if (attempt === retries) throw e;
+    }
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+}
+
+async function fetchEpisodesPage(malId, page) {
+  const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/episodes?page=${page}`);
+  if (!res.ok) throw new Error('jikan episodes page failed');
+  const data = await res.json();
+  return {
+    episodes: (data.data || []).map(e => ({ id: `ep${e.mal_id}`, number: e.mal_id, name: e.title, airdate: e.aired })),
+    lastPage: (data.pagination && data.pagination.last_visible_page) || page,
+  };
+}
+
+async function fetchAllEpisodes(malId) {
+  const first = await fetchEpisodesPage(malId, 1);
+  let all = [...first.episodes];
+  const lastPage = Math.min(first.lastPage, 20);
+  const remainingPages = [];
+  for (let p = 2; p <= lastPage; p++) remainingPages.push(p);
+
+  const BATCH_SIZE = 3;
+  for (let i = 0; i < remainingPages.length; i += BATCH_SIZE) {
+    const batch = remainingPages.slice(i, i + BATCH_SIZE);
+    const results = await Promise.all(batch.map(p => fetchEpisodesPage(malId, p)));
+    results.forEach(r => { all = all.concat(r.episodes); });
+    if (i + BATCH_SIZE < remainingPages.length) await new Promise(r => setTimeout(r, 350));
+  }
+  return all;
+}
+
+// Whether this anime is still airing — determines which cache TTL to use. A
+// lightweight, cheap check (no retry needed; if it fails we just assume "airing"
+// and use the shorter, safer TTL).
+async function isStillAiring(malId) {
+  try {
+    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}`);
+    if (!res.ok) return true;
+    const data = await res.json();
+    return (data.data && data.data.status) !== 'Finished Airing';
+  } catch (e) { return true; }
+}
+
+export default async function handler(req, res) {
+  const malId = req.query.id;
+  if (!malId || !/^\d+$/.test(String(malId))) {
+    return res.status(400).json({ error: 'Missing or invalid id' });
+  }
+
+  const cacheKey = `anime-episodes:${malId}`;
+  const kv = await getKv();
+
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached) return res.status(200).json({ episodes: cached, cached: true });
+    } catch (e) { /* fall through to live */ }
+  }
+
+  let episodes;
+  try {
+    episodes = await fetchAllEpisodes(malId);
+  } catch (e) {
+    return res.status(502).json({ error: 'Upstream source unavailable right now', message: e.message });
+  }
+
+  if (kv && episodes.length > 0) {
+    try {
+      const airing = await isStillAiring(malId);
+      await kv.set(cacheKey, episodes, { ex: airing ? CACHE_SECONDS_AIRING : CACHE_SECONDS_FINISHED });
+    } catch (e) { /* not fatal */ }
+  }
+
+  return res.status(200).json({ episodes, cached: false });
+}
