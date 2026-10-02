@@ -2,12 +2,16 @@
 //
 // Caches Jikan's anime relations (sequel/prequel links) in Vercel KV, effectively
 // permanently — a franchise's relation structure essentially never changes once
-// established. This is exactly the step that was causing incomplete merges (e.g.
-// "My Hero Academia" only showing 3 of its 7 seasons): resolving which seasons
-// belong together depends on walking this relations chain, and Jikan's relations
-// endpoint is the single most rate-limited, flaky part of the whole stack. Once
-// ANY user successfully resolves a franchise's chain, every future lookup for that
-// same anime (by anyone, searching anytime) is instant with zero live calls.
+// established. Resolving which seasons belong together depends on walking this
+// relations chain, and Jikan's relations endpoint is the most rate-limited, flaky
+// part of the whole stack. Once ANY user successfully resolves a franchise's chain,
+// every future lookup for that same anime is instant with zero live calls.
+//
+// IMPORTANT (fix): a FAILED live lookup (429 / timeout / 5xx) now returns HTTP 502
+// instead of "200 with an empty list". Before, the app couldn't tell "Jikan is
+// rate-limiting us" apart from "this anime genuinely has no sequels", so it treated
+// the failure as a real answer, never fell back, and the franchise chain stopped
+// early (MHA at 3 of 7 seasons, Re:Zero stuck at 4 of 8, etc).
 //
 // Query params: ?id=21   (the Jikan/MAL id)
 
@@ -19,11 +23,14 @@ async function getKv() {
 }
 
 const CACHE_SECONDS = 60 * 60 * 24 * 365; // effectively permanent
+// A confirmed "no relations" (standalone anime) is cached for a shorter time — a
+// sequel can still be announced later and needs to be picked up eventually.
+const CACHE_SECONDS_EMPTY = 60 * 60 * 24 * 7;
 
-async function fetchWithRetry(url, retries = 1, delayMs = 500) {
+async function fetchWithRetry(url, retries = 1, delayMs = 500, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, options);
       if (res.ok) return res;
       if (attempt === retries) return res;
     } catch (e) {
@@ -45,24 +52,35 @@ export default async function handler(req, res) {
   if (kv) {
     try {
       const cached = await kv.get(cacheKey);
-      if (cached) return res.status(200).json({ relations: cached, cached: true });
+      // An empty array is a real cached answer ("no relations") and is truthy, so
+      // this serves both cases correctly.
+      if (Array.isArray(cached)) return res.status(200).json({ relations: cached, cached: true });
     } catch (e) { /* fall through to live */ }
   }
 
-  let relations = [];
+  let liveRes = null;
   try {
-    const liveRes = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/relations`, 1, 500);
-    if (liveRes.ok) {
-      const data = await liveRes.json();
-      relations = data.data || [];
-    }
-  } catch (e) { /* relations stays [] */ }
+    liveRes = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/relations`, 1, 500);
+  } catch (e) { liveRes = null; }
 
-  if (kv && relations.length > 0) {
-    try { await kv.set(cacheKey, relations, { ex: CACHE_SECONDS }); } catch (e) { /* not fatal */ }
+  if (!liveRes || !liveRes.ok) {
+    // Never cache a failure, and never disguise it as "no relations".
+    return res.status(502).json({ error: 'Jikan relations unavailable right now' });
   }
-  // An empty result is NOT cached — a 429/transient failure returning empty should
-  // not permanently "freeze" this anime as having no relations.
+
+  let relations;
+  try {
+    const data = await liveRes.json();
+    relations = data.data || [];
+  } catch (e) {
+    return res.status(502).json({ error: 'Jikan relations returned an unreadable response' });
+  }
+
+  if (kv) {
+    try {
+      await kv.set(cacheKey, relations, { ex: relations.length > 0 ? CACHE_SECONDS : CACHE_SECONDS_EMPTY });
+    } catch (e) { /* not fatal */ }
+  }
 
   return res.status(200).json({ relations, cached: false });
 }
