@@ -345,16 +345,27 @@ async function fetchCast(tmdbId, type) {
   } catch (e) { return []; }
 }
 
-// Several anime features (voice cast, recommendations, airing schedule) only exist
-// on Jikan/MyAnimeList — Kitsu and AniList don't expose the same data, and their id
-// numbers don't mean anything on MAL anyway. Rather than simply having none of that
-// for anime that happened to be found via Kitsu or AniList (e.g. because Jikan was
-// down at search time), this resolves the real MAL id through a DIRECT, authoritative
-// source first: Kitsu publishes its own cross-site mapping to MyAnimeList per anime,
-// and AniList's schema has a MAL id built right in (idMal) — neither needs any
-// fuzzy title matching or hits Jikan's search endpoint at all, which is the flakier,
-// heavier endpoint (prone to timeouts under load) compared to a plain id lookup.
-// A fuzzy title search on Jikan itself is kept only as the very last resort.
+// Several anime features (recommendations, airing schedule) only exist on Jikan/
+// MyAnimeList — Kitsu and AniList don't expose the same data, and their id numbers
+// don't mean anything on MAL anyway. This resolves the real MAL id through OUR OWN
+// server-side cached proxy first (api/resolve-anime-id.js) — this exact mapping
+// never changes once an anime exists on MAL, so once any user successfully resolves
+// it, every future lookup for that same anime (by anyone) is instant with zero live
+// calls at all. Falls back to the old direct client-side chain (Kitsu's own
+// mapping, then AniList's idMal, then a fuzzy title search) only if the proxy
+// itself can't be reached, so a server hiccup degrades gracefully rather than
+// becoming a brand new single point of failure.
+async function resolveJikanIdViaProxy(source, idOrTitle, year) {
+  try {
+    const params = source === 'title'
+      ? `title=${encodeURIComponent(idOrTitle)}${year ? `&year=${year}` : ''}`
+      : `source=${source}&id=${encodeURIComponent(idOrTitle)}`;
+    const res = await fetch(`/api/resolve-anime-id?${params}`);
+    if (!res.ok) return undefined; // undefined = proxy itself failed, fall back; null = proxy answered "no match"
+    const data = await res.json();
+    return data.malId || null;
+  } catch (e) { return undefined; }
+}
 async function resolveJikanIdViaKitsuMapping(kitsuId) {
   try {
     const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/mappings`, 1, 500);
@@ -407,13 +418,19 @@ function resolveJikanIdForAnime(item) {
   const key = item.externalId || normalizeTitle(item.title);
   if (jikanIdByAnimeCache.has(key)) return jikanIdByAnimeCache.get(key);
   const promise = (async () => {
-    if (item.externalId && item.externalId.startsWith('kitsu-')) {
-      const viaMapping = await resolveJikanIdViaKitsuMapping(item.externalId.replace('kitsu-', ''));
-      if (viaMapping) return viaMapping;
-    } else if (item.externalId && item.externalId.startsWith('anilist-')) {
-      const viaAniList = await resolveJikanIdViaAniList(item.externalId.replace('anilist-', ''));
-      if (viaAniList) return viaAniList;
+    const source = item.externalId && item.externalId.startsWith('kitsu-') ? 'kitsu'
+      : item.externalId && item.externalId.startsWith('anilist-') ? 'anilist'
+      : null;
+    if (source) {
+      const idPart = item.externalId.replace(`${source}-`, '');
+      const viaProxy = await resolveJikanIdViaProxy(source, idPart);
+      if (viaProxy !== undefined) return viaProxy; // proxy answered (a real id, or a confirmed "no match")
+      // Proxy itself unreachable — fall back to the direct client-side chain.
+      const viaDirect = source === 'kitsu' ? await resolveJikanIdViaKitsuMapping(idPart) : await resolveJikanIdViaAniList(idPart);
+      if (viaDirect) return viaDirect;
     }
+    const viaTitleProxy = await resolveJikanIdViaProxy('title', item.title, item.year);
+    if (viaTitleProxy !== undefined) return viaTitleProxy;
     return resolveJikanIdByTitleSearch(item.title, item.year);
   })();
   jikanIdByAnimeCache.set(key, promise);
@@ -601,15 +618,30 @@ async function fetchSimilarTitles(item) {
         ? animeDbId
         : await resolveJikanIdForAnime({ externalId: animeExternalId, title: item.title, year: item.year });
       if (!jikanId) return [];
-      const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`, 2, 500);
-      if (!res.ok) return [];
-      const data = await res.json();
-      const raw = (data.data || []).slice(0, 8).map(r => ({
-        type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
-        posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
-        year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
-        episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
-      }));
+      let raw = [];
+      try {
+        const proxyRes = await fetch(`/api/anime-recommendations?id=${jikanId}`);
+        if (proxyRes.ok) {
+          const proxyData = await proxyRes.json();
+          raw = (proxyData.results || []).map(r => ({
+            type: 'anime', externalId: r.externalId, title: r.title, posterUrl: r.posterUrl,
+            year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
+            episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
+          }));
+        } else {
+          throw new Error('proxy not ok');
+        }
+      } catch (e) {
+        const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`, 2, 500);
+        if (!res.ok) return [];
+        const data = await res.json();
+        raw = (data.data || []).slice(0, 8).map(r => ({
+          type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
+          posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
+          year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
+          episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
+        }));
+      }
       // Recommendations never went through the merge pass search results get, so a
       // recommended "Kuroko no Basket 3rd Season" showed up as its own separate card
       // instead of folding into the one merged Kuroko entry. Same fix as Trending/
@@ -919,6 +951,14 @@ async function fetchAnimeEpisodesPage(malId, page = 1) {
 // are fetched in small parallel batches instead (a gentle pace, to stay within
 // Jikan's rate limit rather than firing everything at once).
 async function fetchAnimeEpisodesForId(malId) {
+  try {
+    const res = await fetch(`/api/anime-episodes?id=${malId}`);
+    if (res.ok) {
+      const data = await res.json();
+      if (data.episodes && data.episodes.length > 0) return data.episodes;
+    }
+  } catch (e) { /* proxy unreachable — fall back to the direct path below */ }
+
   const first = await fetchAnimeEpisodesPage(malId, 1);
   let all = [...first.episodes];
   const lastPage = Math.min(first.lastPage, 20); // generous cap so even very long-running anime resolve fully
