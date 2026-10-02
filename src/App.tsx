@@ -601,14 +601,14 @@ async function fetchSimilarTitles(item) {
         }));
     }
     if (item.type === 'anime') {
-      // For a merged multi-season entry, item.externalId is the EARLIEST season —
-      // the latest/ongoing one tends to have more community-submitted
-      // recommendations on MAL than an old first season does, same reasoning as
-      // the airing-status check elsewhere.
-      let animeExternalId = item.externalId;
-      if (item.mergedAnimeIds && item.mergedAnimeIds.length > 1) {
-        animeExternalId = item.mergedAnimeIds[item.mergedAnimeIds.length - 1];
-      }
+      // Recommendations are community-submitted over time — unlike airing status
+      // (where the LATEST season is what matters), here the EARLIEST/original
+      // season is the better choice: it's had years to accumulate recommendations,
+      // while a brand-new latest season (especially one still airing) usually has
+      // none yet. item.externalId already IS the earliest season for a merged
+      // entry (that's how the canonical representative gets chosen), so no
+      // override is needed here at all.
+      const animeExternalId = item.externalId;
       const animeDbId = (animeExternalId || '').split('-').slice(1).join('-');
       // dbId here is only a real Jikan/MAL id for items that came from Jikan in the
       // first place. For Kitsu/AniList-sourced items, that same number means
@@ -617,30 +617,44 @@ async function fetchSimilarTitles(item) {
       let jikanId = animeExternalId && animeExternalId.startsWith('jikan-')
         ? animeDbId
         : await resolveJikanIdForAnime({ externalId: animeExternalId, title: item.title, year: item.year });
-      if (!jikanId) return [];
-      let raw = [];
-      try {
-        const proxyRes = await fetch(`/api/anime-recommendations?id=${jikanId}`);
-        if (proxyRes.ok) {
-          const proxyData = await proxyRes.json();
-          raw = (proxyData.results || []).map(r => ({
-            type: 'anime', externalId: r.externalId, title: r.title, posterUrl: r.posterUrl,
+
+      const fetchRecsFor = async (id) => {
+        if (!id) return [];
+        try {
+          const proxyRes = await fetch(`/api/anime-recommendations?id=${id}`);
+          if (proxyRes.ok) {
+            const proxyData = await proxyRes.json();
+            return (proxyData.results || []).map(r => ({
+              type: 'anime', externalId: r.externalId, title: r.title, posterUrl: r.posterUrl,
+              year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
+              episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
+            }));
+          }
+          throw new Error('proxy not ok');
+        } catch (e) {
+          const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${id}/recommendations`, 2, 500);
+          if (!res.ok) return [];
+          const data = await res.json();
+          return (data.data || []).slice(0, 8).map(r => ({
+            type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
+            posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
             year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
             episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
           }));
-        } else {
-          throw new Error('proxy not ok');
         }
-      } catch (e) {
-        const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${jikanId}/recommendations`, 2, 500);
-        if (!res.ok) return [];
-        const data = await res.json();
-        raw = (data.data || []).slice(0, 8).map(r => ({
-          type: 'anime', externalId: `jikan-${r.entry.mal_id}`, title: r.entry.title,
-          posterUrl: (r.entry.images && r.entry.images.jpg && r.entry.images.jpg.image_url) || null,
-          year: null, summary: '', ratingValue: null, ratingSource: 'MAL', popularityScore: 0,
-          episodes: null, runtimeMinutes: null, statusText: null, trailerUrl: null,
-        }));
+      };
+
+      let raw = await fetchRecsFor(jikanId);
+      // The original season sometimes genuinely has none either (an obscure older
+      // show) — try the latest merged season too before giving up entirely.
+      if (raw.length === 0 && item.mergedAnimeIds && item.mergedAnimeIds.length > 1) {
+        const latestExternalId = item.mergedAnimeIds[item.mergedAnimeIds.length - 1];
+        if (latestExternalId !== animeExternalId) {
+          const latestJikanId = latestExternalId.startsWith('jikan-')
+            ? latestExternalId.replace('jikan-', '')
+            : await resolveJikanIdForAnime({ externalId: latestExternalId, title: item.title, year: item.year });
+          raw = await fetchRecsFor(latestJikanId);
+        }
       }
       // Recommendations never went through the merge pass search results get, so a
       // recommended "Kuroko no Basket 3rd Season" showed up as its own separate card
