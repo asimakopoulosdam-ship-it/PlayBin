@@ -1,11 +1,20 @@
 // Save this file as: api/anime-episodes.js  (inside the "api" folder at your project root)
 //
 // Caches a Jikan anime's full episode list (assembled across however many pages it
-// takes) in Vercel KV. Episode lists for a FINISHED anime never change at all —
-// cached effectively permanently. For a still-airing anime, new episodes get added
-// periodically, so those get a much shorter cache window instead, re-checking live
-// often enough to pick up new episodes promptly without re-fetching a 1000-episode
-// back catalog every time.
+// takes) in Vercel KV. Finished anime: cached effectively permanently. Still airing:
+// short cache, so new episodes show up promptly.
+//
+// FIXES:
+//  - MAL often has NO episode list (or an incomplete one) for new / currently airing
+//    anime. Jikan then answers with an empty list, and the season showed up with no
+//    episodes — or vanished entirely from a merged franchise. Now AniList (looked up
+//    by the same MAL id) supplies how many episodes have actually aired, and any
+//    episode MAL hasn't listed yet is added as a plain "Episode N" entry. The ids use
+//    the exact same format Jikan uses ("ep" + number), so once MAL fills in real
+//    titles, already-checked episodes stay checked.
+//  - Airing status now comes from that same AniList call. The old separate Jikan
+//    status call ran right after up to 20 page fetches, almost always hit the rate
+//    limit, and fell back to "airing" — so finished anime were only cached for 12h.
 //
 // Query params: ?id=21   (the Jikan/MAL id)
 
@@ -19,10 +28,10 @@ async function getKv() {
 const CACHE_SECONDS_FINISHED = 60 * 60 * 24 * 365; // effectively permanent
 const CACHE_SECONDS_AIRING = 60 * 60 * 12; // 12 hours — new episodes should show up reasonably fast
 
-async function fetchWithRetry(url, retries = 2, delayMs = 900) {
+async function fetchWithRetry(url, retries = 2, delayMs = 900, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, options);
       if (res.ok) return res;
       if (attempt === retries) return res;
     } catch (e) {
@@ -59,16 +68,26 @@ async function fetchAllEpisodes(malId) {
   return all;
 }
 
-// Whether this anime is still airing — determines which cache TTL to use. A
-// lightweight, cheap check (no retry needed; if it fails we just assume "airing"
-// and use the shorter, safer TTL).
-async function isStillAiring(malId) {
+// Status + how many episodes have actually aired, from AniList (by MAL id).
+// Returns null if AniList couldn't answer — callers then play it safe.
+async function fetchAiringInfo(malId) {
+  const query = `query ($idMal: Int) { Media(idMal: $idMal, type: ANIME) { status episodes nextAiringEpisode { episode } } }`;
   try {
-    const res = await fetch(`https://api.jikan.moe/v4/anime/${malId}`);
-    if (!res.ok) return true;
+    const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+      body: JSON.stringify({ query, variables: { idMal: Number(malId) } }),
+    });
+    if (!res || !res.ok) return null;
     const data = await res.json();
-    return (data.data && data.data.status) !== 'Finished Airing';
-  } catch (e) { return true; }
+    const m = data.data && data.data.Media;
+    if (!m) return null;
+    let airedCount;
+    if (m.nextAiringEpisode && m.nextAiringEpisode.episode) airedCount = m.nextAiringEpisode.episode - 1;
+    else if (m.status === 'NOT_YET_RELEASED') airedCount = 0;
+    else airedCount = m.episodes || 0;
+    return { status: m.status, airedCount };
+  } catch (e) { return null; }
 }
 
 export default async function handler(req, res) {
@@ -83,7 +102,7 @@ export default async function handler(req, res) {
   if (kv) {
     try {
       const cached = await kv.get(cacheKey);
-      if (cached) return res.status(200).json({ episodes: cached, cached: true });
+      if (Array.isArray(cached)) return res.status(200).json({ episodes: cached, cached: true });
     } catch (e) { /* fall through to live */ }
   }
 
@@ -91,14 +110,31 @@ export default async function handler(req, res) {
   try {
     episodes = await fetchAllEpisodes(malId);
   } catch (e) {
+    // Jikan itself failed — report it (the app falls back), never cache it.
     return res.status(502).json({ error: 'Upstream source unavailable right now', message: e.message });
   }
 
-  if (kv && episodes.length > 0) {
-    try {
-      const airing = await isStillAiring(malId);
-      await kv.set(cacheKey, episodes, { ex: airing ? CACHE_SECONDS_AIRING : CACHE_SECONDS_FINISHED });
-    } catch (e) { /* not fatal */ }
+  const info = await fetchAiringInfo(malId);
+  const stillAiring = !info || info.status !== 'FINISHED';
+
+  // Add any aired episodes MAL hasn't listed yet.
+  let addedPlaceholders = false;
+  if (info && info.airedCount > 0) {
+    const highestListed = episodes.reduce((max, e) => Math.max(max, Number(e.number) || 0), 0);
+    for (let n = highestListed + 1; n <= info.airedCount && n <= 3000; n++) {
+      // "recent" tells the app this belongs to a season that's airing right now, so a
+      // brand-new season with only its first episode out isn't mistaken for a
+      // one-off special and dropped.
+      episodes.push({ id: `ep${n}`, number: n, name: null, airdate: null, recent: info.status === 'RELEASING' });
+      addedPlaceholders = true;
+    }
+  }
+
+  // Cache only answers we actually trust: a non-empty list, or an empty list that
+  // AniList confirmed (e.g. not aired yet).
+  if (kv && (episodes.length > 0 || info)) {
+    const ttl = (stillAiring || addedPlaceholders) ? CACHE_SECONDS_AIRING : CACHE_SECONDS_FINISHED;
+    try { await kv.set(cacheKey, episodes, { ex: ttl }); } catch (e) { /* not fatal */ }
   }
 
   return res.status(200).json({ episodes, cached: false });
