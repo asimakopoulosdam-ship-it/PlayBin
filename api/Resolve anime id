@@ -1,0 +1,119 @@
+// Save this file as: api/resolve-anime-id.js  (inside the "api" folder at your project root)
+//
+// Resolves a Kitsu/AniList anime id (or a plain title) to its real MyAnimeList id,
+// cached PERMANENTLY in Vercel KV. This mapping never changes once an anime exists
+// on MAL — "Black Torch" (Kitsu) always maps to the same MAL id — so once resolved
+// successfully for ANY user, every future lookup for that same anime (by any user,
+// forever) is served instantly from cache with zero live calls. This is exactly the
+// lookup chain that was causing the worst, most visible problems throughout
+// development: it's what "You might also like", the voice cast (now removed), the
+// merged-season refresh, and the Upcoming next-episode check all depend on for any
+// anime that wasn't found via Jikan directly.
+//
+// Query params:
+//   ?source=kitsu&id=12345       — resolve via Kitsu's own MAL mapping
+//   ?source=anilist&id=12345     — resolve via AniList's idMal field
+//   ?title=Some+Title&year=2021  — last-resort fuzzy title search on AniList
+
+async function getKv() {
+  try {
+    const mod = await import('@vercel/kv');
+    return mod.kv;
+  } catch (e) { return null; }
+}
+
+const CACHE_SECONDS = 60 * 60 * 24 * 365; // effectively permanent — this mapping doesn't change
+
+async function fetchWithRetry(url, retries = 1, delayMs = 500, options) {
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, options);
+      if (res.ok) return res;
+      if (attempt === retries) return res;
+    } catch (e) {
+      if (attempt === retries) throw e;
+    }
+    await new Promise(r => setTimeout(r, delayMs));
+  }
+}
+
+async function resolveViaKitsuMapping(kitsuId) {
+  const res = await fetchWithRetry(`https://kitsu.io/api/edge/anime/${kitsuId}/mappings`, 1, 500);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const list = data.data || [];
+  const malMapping = list.find(m => m.attributes && m.attributes.externalSite === 'myanimelist/anime');
+  return (malMapping && malMapping.attributes.externalId) ? String(malMapping.attributes.externalId) : null;
+}
+
+async function resolveViaAniListId(anilistId) {
+  const query = `query ($id: Int) { Media(id: $id, type: ANIME) { idMal } }`;
+  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 500, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ query, variables: { id: Number(anilistId) } }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const idMal = data.data && data.data.Media && data.data.Media.idMal;
+  return idMal ? String(idMal) : null;
+}
+
+function normalizeTitle(t) {
+  return (t || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+}
+
+async function resolveViaTitleSearch(title, year) {
+  const query = `query ($search: String) { Page(page: 1, perPage: 5) { media(search: $search, type: ANIME) { idMal title { romaji english } startDate { year } } } }`;
+  const res = await fetchWithRetry('https://graphql.anilist.co', 1, 600, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify({ query, variables: { search: title } }),
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  const list = (data.data && data.data.Page && data.data.Page.media) || [];
+  if (list.length === 0) return null;
+  const nq = normalizeTitle(title);
+  let best = year && list.find(a => a.startDate && a.startDate.year === Number(year));
+  if (!best) best = list.find(a => normalizeTitle(a.title.english || a.title.romaji) === nq);
+  if (!best) best = list[0];
+  return (best && best.idMal) ? String(best.idMal) : null;
+}
+
+export default async function handler(req, res) {
+  const { source, id, title, year } = req.query;
+  if (!['kitsu', 'anilist'].includes(source) && !title) {
+    return res.status(400).json({ error: 'Provide source+id (kitsu|anilist) or title' });
+  }
+
+  const cacheKey = title ? `resolve-anime-id:title:${title.toLowerCase().trim()}` : `resolve-anime-id:${source}:${id}`;
+  const kv = await getKv();
+
+  if (kv) {
+    try {
+      const cached = await kv.get(cacheKey);
+      if (cached !== null && cached !== undefined) {
+        return res.status(200).json({ malId: cached || null, cached: true });
+      }
+    } catch (e) { /* fall through to live */ }
+  }
+
+  let malId = null;
+  try {
+    if (source === 'kitsu') malId = await resolveViaKitsuMapping(id);
+    else if (source === 'anilist') malId = await resolveViaAniListId(id);
+    else malId = await resolveViaTitleSearch(title, year);
+  } catch (e) { /* malId stays null */ }
+
+  if (kv) {
+    try {
+      // Cache the miss too (a short-lived one) so a genuinely unmappable anime
+      // doesn't get hammered repeatedly either, same idea as the client-side
+      // negative caching already in place for the Upcoming check.
+      await kv.set(cacheKey, malId, { ex: malId ? CACHE_SECONDS : 60 * 60 * 24 });
+    } catch (e) { /* not fatal */ }
+  }
+
+  return res.status(200).json({ malId, cached: false });
+}
