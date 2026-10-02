@@ -2209,12 +2209,21 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
     if ((result.type === 'movie' || result.type === 'series') && result.tmdbId) {
       fetchCast(result.tmdbId, result.type).then(r => { if (!cancelled) setCast(r); }).catch(() => {});
     } else if (result.type === 'anime' && result.externalId) {
+      // For a merged multi-season entry, result.externalId is the EARLIEST season
+      // (that's how the canonical representative is chosen) — checking THAT one's
+      // airing status means a long-finished Season 1 always says "finished airing"
+      // even when a much later season is still actively airing. The latest season
+      // (last in the merged list) is the one whose status actually matters here —
+      // same fix already applied to checkOneUpcoming and ItemModal's airing note.
+      const latestExternalId = (result.mergedAnimeIds && result.mergedAnimeIds.length > 1)
+        ? result.mergedAnimeIds[result.mergedAnimeIds.length - 1]
+        : result.externalId;
       // Genuinely Jikan-sourced entries already have the right id; anything else
       // (Kitsu/AniList) gets resolved via a direct cross-site mapping, since MAL is
       // the only source with broadcast-day data at all.
-      const jikanIdPromise = result.externalId.startsWith('jikan-')
-        ? Promise.resolve(result.externalId.replace('jikan-', ''))
-        : resolveJikanIdForAnime(result);
+      const jikanIdPromise = latestExternalId.startsWith('jikan-')
+        ? Promise.resolve(latestExternalId.replace('jikan-', ''))
+        : resolveJikanIdForAnime({ externalId: latestExternalId, title: result.title, year: result.year });
       jikanIdPromise.then(async malId => {
         if (!malId || cancelled) return;
         await new Promise(r => setTimeout(r, 400)); // let the seasons/recommendations calls above clear first
