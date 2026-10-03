@@ -2244,6 +2244,23 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
   const already = !!existingItem;
   const notYetReleased = !!(detail.releaseDate && new Date(detail.releaseDate) > new Date());
   const isAnimeMovieResult = result.type === 'anime' && result.subtype && String(result.subtype).toUpperCase() === 'MOVIE';
+  // [fix-v2:merged-ep-count] For a merged multi-season anime, detail.episodes is only
+  // the FIRST season's count (e.g. Attack on Titan showed "25 episodes" for the whole
+  // franchise). Once the real season list loads, the true total across every season
+  // is shown instead. Series keep TMDB's own count (their season list also contains
+  // "Specials", which TMDB's total rightly leaves out).
+  const isMergedAnimeResult = result.type === 'anime' && result.mergedAnimeIds && result.mergedAnimeIds.length > 1;
+  const loadedEpisodeTotal = (result.type === 'anime' && seasons)
+    ? seasons.reduce((sum, s) => sum + (s.episodes ? s.episodes.length : 0), 0)
+    : 0;
+  let episodeCountText;
+  if (loadedEpisodeTotal > 0) {
+    episodeCountText = `${loadedEpisodeTotal} episodes` + (isMergedAnimeResult && seasons.length > 1 ? ` · ${seasons.length} seasons` : '');
+  } else if (isMergedAnimeResult) {
+    episodeCountText = loadingSeasons ? 'counting episodes…' : 'episode count unknown';
+  } else {
+    episodeCountText = detail.episodes != null ? `${detail.episodes} episodes` : 'episode count unknown';
+  }
   const watchedSet = new Set((existingItem && existingItem.watchedEpisodeIds) || []);
   const dbId = (result.externalId || '').split('-').slice(1).join('-');
 
@@ -2320,7 +2337,7 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
             <div style={{ marginBottom: 6 }}><ExternalStars value={detail.ratingValue} source={detail.ratingSource} size={14} /></div>
             <div className="detail-facts">
               {detail.type !== 'movie' && (
-                <span>{detail.episodes != null ? `${detail.episodes} episodes` : 'episode count unknown'}</span>
+                <span>{episodeCountText}</span>
               )}
               {detail.runtimeMinutes ? (
                 detail.type === 'movie'
