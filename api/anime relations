@@ -30,7 +30,9 @@ const CACHE_SECONDS_EMPTY = 60 * 60 * 24 * 7;
 async function fetchWithRetry(url, retries = 1, delayMs = 500, options) {
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(url, options);
+      // Hard 4s limit per attempt — a hanging Jikan request must not hold the
+      // whole function (and the app waiting on it) until Vercel's own timeout.
+      const res = await fetch(url, { ...(options || {}), signal: AbortSignal.timeout(4000) });
       if (res.ok) return res;
       if (attempt === retries) return res;
     } catch (e) {
