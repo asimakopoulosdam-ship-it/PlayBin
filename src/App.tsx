@@ -1018,24 +1018,51 @@ async function fetchAnimeEpisodesForId(malId) {
   return all;
 }
 
-// [fix-v2:relations] Returns the relations list, [] for a confirmed "no relations",
-// or null when the lookup itself failed. The chain-walk below needs to tell those
-// apart: a failed lookup must not be remembered as a finished (but incomplete) chain.
+// [fix-v2:relations-timeout] fetch() with a hard time limit. A request that hangs
+// (Jikan sometimes just never answers) used to block the whole merge — and with it
+// Trending Now — indefinitely.
+async function fetchWithTimeout(url, ms, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  try { return await fetch(url, { ...(options || {}), signal: controller.signal }); }
+  finally { clearTimeout(timer); }
+}
+
+// Successful relation lookups are kept for the session (re-walking a chain then only
+// re-asks for the ids that failed). A failed id is skipped for a few seconds, so the
+// several merge passes that run back-to-back for one screen don't all hammer the
+// same struggling request again.
+const relationsSessionCache = new Map(); // malId -> relations[]
+const relationsFailedAt = new Map(); // malId -> timestamp of last failure
+const RELATIONS_FAILURE_COOLDOWN_MS = 3000;
+
+// Returns the relations list, [] for a confirmed "no relations", or null when the
+// lookup itself failed. The chain-walk needs to tell those apart: a failed lookup
+// must not be remembered as a finished (but incomplete) chain.
 async function fetchAnimeRelations(malId) {
+  const key = String(malId);
+  if (relationsSessionCache.has(key)) return relationsSessionCache.get(key);
+  const failedAt = relationsFailedAt.get(key);
+  if (failedAt && Date.now() - failedAt < RELATIONS_FAILURE_COOLDOWN_MS) return null;
+
+  const remember = (list) => { relationsSessionCache.set(key, list); relationsFailedAt.delete(key); return list; };
   try {
-    const proxyRes = await fetch(`/api/anime-relations?id=${malId}`);
+    const proxyRes = await fetchWithTimeout(`/api/anime-relations?id=${key}`, 9000);
     if (proxyRes.ok) {
       const proxyData = await proxyRes.json();
-      if (Array.isArray(proxyData.relations)) return proxyData.relations;
+      if (Array.isArray(proxyData.relations)) return remember(proxyData.relations);
     }
     // Not ok (502 = Jikan failed upstream) — fall through to one direct attempt.
-  } catch (e) { /* proxy unreachable — fall through to the direct call below */ }
+  } catch (e) { /* proxy unreachable or timed out — fall through */ }
   try {
-    const res = await fetchWithRetry(`https://api.jikan.moe/v4/anime/${malId}/relations`, 0);
-    if (!res.ok) return null;
-    const data = await res.json();
-    return data.data || [];
-  } catch (e) { return null; }
+    const res = await fetchWithTimeout(`https://api.jikan.moe/v4/anime/${key}/relations`, 5000);
+    if (res.ok) {
+      const data = await res.json();
+      return remember(data.data || []);
+    }
+  } catch (e) { /* timed out / network error */ }
+  relationsFailedAt.set(key, Date.now());
+  return null;
 }
 
 // Minimal single-anime lookup used only to order merged seasons chronologically and
@@ -2440,6 +2467,18 @@ function ResultDetailSheet({ result, items, onClose, onAdd, onOpenEpisodes, onQu
 
 /* ---------------------------------- Discover (home) ---------------------------------- */
 
+// [fix-v2:merge-budget] Merging multi-season anime in Trending/Zapping is a nice
+// extra, never a reason to keep the screen on "Loading…". The merge gets a fixed
+// time budget; if it isn't done by then, the plain list is shown and (for Trending)
+// swapped for the merged one whenever it finishes in the background.
+const MERGE_TIME_BUDGET_MS = 3500;
+function withTimeBudget(promise, ms, fallback) {
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, profileName }) {
   const [discoverTab, setDiscoverTab] = useState('search'); // 'search' | 'upcoming'
   const [typeFilter, setTypeFilter] = useState('all'); // 'all' | 'movie' | 'series' | 'anime' — applies while in Search
@@ -2485,7 +2524,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
     zapSeenPagesRef.current = new Set([startPage]);
     const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
     fetchPopular(zapType, startPage)
-      .then(raw => mergeAnimeWithinTrendingBatch(raw))
+      .then(raw => withTimeBudget(mergeAnimeWithinTrendingBatch(raw), MERGE_TIME_BUDGET_MS, raw))
       .then(setZapItems)
       .catch(() => setZapItems([]))
       .finally(() => setZapLoading(false));
@@ -2539,7 +2578,23 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
       setTrendingLoading(true);
       try {
         const raw = await fetchTrendingAll(1);
-        setTrending(await mergeAnimeWithinTrendingBatch(raw));
+        const fullMerge = mergeAnimeWithinTrendingBatch(raw);
+        const quick = await withTimeBudget(fullMerge, MERGE_TIME_BUDGET_MS, null);
+        if (quick) {
+          setTrending(quick);
+        } else {
+          setTrending(raw);
+          // Upgrade to the merged version once it's ready — only if the list still
+          // starts with this exact first page (so a "Show more" in between is kept).
+          fullMerge.then(merged => {
+            setTrending(prev => {
+              if (!prev || prev.length < raw.length || !raw.every((r, i) => prev[i] === r)) return prev;
+              const mergedIds = new Set(merged.map(m => m.externalId));
+              const rest = prev.slice(raw.length).filter(r => !mergedIds.has(r.externalId));
+              return [...merged, ...rest];
+            });
+          }).catch(() => {});
+        }
       } catch (e) { setTrending([]); }
       setTrendingLoading(false);
     })();
@@ -2561,7 +2616,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
       let more = await fetchTrendingAll(nextPage);
       if (more.length === 0) setTrendingExhausted(true);
       else {
-        more = await mergeAnimeWithinTrendingBatch(more);
+        more = await withTimeBudget(mergeAnimeWithinTrendingBatch(more), MERGE_TIME_BUDGET_MS, more);
         setTrending(prev => {
           const existingIds = new Set((prev || []).map(r => r.externalId));
           const deduped = more.filter(r => !existingIds.has(r.externalId));
@@ -2712,7 +2767,7 @@ function DiscoverScreen({ items, onOpen, onQuickAdd, onOpenEpisodes, onDelete, p
                   const zapType = typeFilter === 'all' ? 'mix' : typeFilter;
                   fetchPopular(zapType, nextPage).then(async more => {
                     if (more.length > 0) {
-                      more = await mergeAnimeWithinTrendingBatch(more);
+                      more = await withTimeBudget(mergeAnimeWithinTrendingBatch(more), MERGE_TIME_BUDGET_MS, more);
                       setZapItems(prev => {
                         const existingIds = new Set((prev || []).map(r => r.externalId));
                         const deduped = more.filter(r => !existingIds.has(r.externalId));
